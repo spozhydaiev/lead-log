@@ -58,6 +58,13 @@ func (m *MockClientLLM) SummarizePerson(ctx context.Context, input string) (stri
 	return input, nil
 }
 
+func (m *MockClientLLM) GenerateAgenda(ctx context.Context, input string) (models.Agenda, error) {
+	return models.Agenda{
+		DiscussionTopics: []models.AgendaDiscussionTopic{{Title: "Уточнити поточний фокус", Context: "Є релевантні нотатки для обговорення.", SourceNoteIDs: []int64{1}}},
+		OpenFollowups:    []models.AgendaTextItem{{Text: "Обговорити відкритий follow-up.", SourceNoteIDs: []int64{1}}},
+	}, nil
+}
+
 func (m *MockClientLLM) Model() string {
 	return "mock"
 }

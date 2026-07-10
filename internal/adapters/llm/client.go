@@ -21,6 +21,7 @@ type ClientLLM interface {
 	SummarizeWeekly(ctx context.Context, input string) (string, error)
 	Model() string
 	SummarizePerson(ctx context.Context, input string) (string, error)
+	GenerateAgenda(ctx context.Context, input string) (models.Agenda, error)
 }
 
 type Client struct {
@@ -64,6 +65,15 @@ type chatCompletionResponse struct {
 func (c *Client) SummarizePerson(ctx context.Context, input string) (string, error) {
 	prompt := personPrompt() + "\n\nPerson context:\n" + input
 	return c.chatText(ctx, prompt)
+}
+
+func (c *Client) GenerateAgenda(ctx context.Context, input string) (models.Agenda, error) {
+	prompt := agendaPrompt() + "\n\nPerson context and open actions:\n" + input
+	content, err := c.chatJSON(ctx, prompt)
+	if err != nil {
+		return models.Agenda{}, err
+	}
+	return ParseAgendaJSON(content)
 }
 
 func personPrompt() string {
@@ -278,4 +288,37 @@ All user-facing summaries, actions, ticket drafts, agendas and explanations must
 Do not switch language unless the user explicitly asks.
 Respond in Ukrainian, but preserve person names as they are stored in the user's canonical people database.
 Do not translate or transliterate person names unless mapping to an existing canonical person.`
+}
+
+func agendaPrompt() string {
+	return `You are preparing a concise 1:1 agenda for a team lead from existing manager-provided notes and open actions.
+Respond in Ukrainian for all user-facing field values.
+Keep it practical, conversational, neutral, and source-bound.
+Do not evaluate the employee. Do not score people. Do not rank people. Do not recommend HR decisions.
+Do not say someone is a low performer. Do not invent facts.
+Every agenda item must be based on the provided people notes or open actions.
+If a section has no source-backed items, return an empty array.
+Use source_note_ids from the source when available; for open actions without source notes, use an empty source_note_ids array.
+
+Return valid JSON only with this exact shape:
+{
+  "discussion_topics": [
+    {"title": "short topic", "context": "why it is useful to discuss, based only on notes", "source_note_ids": [1]}
+  ],
+  "open_followups": [
+    {"text": "open follow-up", "source_note_ids": [1]}
+  ],
+  "positive_signals": [
+    {"text": "positive source-backed signal to mention", "source_note_ids": [1]}
+  ],
+  "risks_or_concerns_to_clarify": [
+    {"text": "risk or concern framed as something to clarify", "source_note_ids": [1]}
+  ],
+  "growth_topics": [
+    {"text": "source-backed growth topic", "source_note_ids": [1]}
+  ],
+  "suggested_questions": [
+    {"text": "conversational question", "source_note_ids": [1]}
+  ]
+}`
 }

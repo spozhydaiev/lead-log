@@ -211,7 +211,7 @@ func (s *Store) GetPersonContext(ctx context.Context, userID int64, name string,
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT type, COALESCE(theme, ''), text, COALESCE(note_id, 0), created_at
+		SELECT type, COALESCE(theme, ''), text, COALESCE(note_id, 0), source_note_ids, created_at
 		FROM people_notes
 		WHERE user_id = $1 AND person_id = $2 AND created_at >= $3
 		ORDER BY created_at DESC
@@ -222,10 +222,10 @@ func (s *Store) GetPersonContext(ctx context.Context, userID int64, name string,
 	}
 	defer rows.Close()
 
-	ctxOut := models.PersonContext{PersonName: canonicalName}
+	ctxOut := models.PersonContext{PersonID: personID, PersonName: canonicalName}
 	for rows.Next() {
 		var n models.PersonContextNote
-		if err := rows.Scan(&n.Type, &n.Theme, &n.Text, &n.NoteID, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.Type, &n.Theme, &n.Text, &n.NoteID, &n.SourceNoteIDs, &n.CreatedAt); err != nil {
 			return models.PersonContext{}, err
 		}
 		ctxOut.Notes = append(ctxOut.Notes, n)
@@ -241,7 +241,7 @@ func (s *Store) GetPersonContext(ctx context.Context, userID int64, name string,
 
 func (s *Store) ListOpenActionsForPerson(ctx context.Context, userID, personID int64, limit int) ([]models.Action, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, title, status, COALESCE(output_type, ''), created_at
+		SELECT id, title, status, COALESCE(output_type, ''), created_at, source_note_ids
 		FROM actions
 		WHERE user_id = $1 AND linked_person_id = $2 AND status = 'open'
 		ORDER BY created_at DESC
@@ -255,7 +255,7 @@ func (s *Store) ListOpenActionsForPerson(ctx context.Context, userID, personID i
 	var result []models.Action
 	for rows.Next() {
 		var a models.Action
-		if err := rows.Scan(&a.ID, &a.Title, &a.Status, &a.OutputType, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Title, &a.Status, &a.OutputType, &a.CreatedAt, &a.SourceNoteIDs); err != nil {
 			return nil, err
 		}
 		result = append(result, a)
@@ -628,10 +628,10 @@ func (s *Store) SaveAgentResponse(ctx context.Context, r models.AgentResponse) e
 	return err
 }
 
-func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name string, since time.Time) (string, string, error) {
+func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name string, since time.Time) (int64, string, string, error) {
 	pc, err := s.GetPersonContext(ctx, userID, name, since)
 	if err != nil {
-		return "", "", err
+		return 0, "", "", err
 	}
 
 	var b strings.Builder
@@ -640,7 +640,7 @@ func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name stri
 	if len(pc.Actions) > 0 {
 		b.WriteString("Open actions:\n")
 		for _, a := range pc.Actions {
-			b.WriteString(fmt.Sprintf("- #%d %s [%s]\n", a.ID, a.Title, a.OutputType))
+			b.WriteString(fmt.Sprintf("- action #%d | %s | %s | source notes %v\n", a.ID, a.Title, a.OutputType, a.SourceNoteIDs))
 		}
 		b.WriteString("\n")
 	}
@@ -659,7 +659,7 @@ func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name stri
 		}
 	}
 
-	return pc.PersonName, b.String(), nil
+	return pc.PersonID, pc.PersonName, b.String(), nil
 }
 
 func (s *Store) HasDailySummarySend(ctx context.Context, userID int64, scopeKey string) (bool, error) {
