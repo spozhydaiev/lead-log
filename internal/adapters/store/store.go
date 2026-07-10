@@ -432,6 +432,35 @@ func (s *Store) RecentWeeklySource(ctx context.Context, userID int64, since time
 	return b.String(), rows.Err()
 }
 
+const dailyPeopleNoteInsertSQL = `
+	INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review)
+	SELECT $1, $2, NULL, $3, $4, $5, $6
+	WHERE NOT EXISTS (
+		SELECT 1 FROM people_notes
+		WHERE user_id = $1
+		  AND person_id = $2
+		  AND note_id IS NULL
+		  AND type = $3
+		  AND COALESCE(theme, '') = COALESCE($4, '')
+		  AND text = $5
+		  AND created_at >= $7 AND created_at < $8
+	)
+`
+
+const dailyActionInsertSQL = `
+	INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type)
+	SELECT $1, NULL, $2::bigint, $3, $4
+	WHERE NOT EXISTS (
+		SELECT 1 FROM actions
+		WHERE user_id = $1
+		  AND note_id IS NULL
+		  AND title = $3
+		  AND COALESCE(output_type, '') = COALESCE($4, '')
+		  AND COALESCE(linked_person_id, 0::bigint) = COALESCE($2::bigint, 0::bigint)
+		  AND created_at >= $5 AND created_at < $6
+	)
+`
+
 func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, parsed models.ParsedNote) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -476,20 +505,7 @@ func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start,
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review)
-			SELECT $1, $2, NULL, $3, $4, $5, $6
-			WHERE NOT EXISTS (
-				SELECT 1 FROM people_notes
-				WHERE user_id = $1
-				  AND person_id = $2
-				  AND note_id IS NULL
-				  AND type = $3
-				  AND COALESCE(theme, '') = COALESCE($4, '')
-				  AND text = $5
-				  AND created_at >= $7 AND created_at < $8
-			)
-		`, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, start, end); err != nil {
+		if _, err := tx.Exec(ctx, dailyPeopleNoteInsertSQL, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, start, end); err != nil {
 			return err
 		}
 	}
@@ -507,19 +523,7 @@ func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start,
 			}
 			linkedPersonID = &pid
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type)
-			SELECT $1, NULL, $2, $3, $4
-			WHERE NOT EXISTS (
-				SELECT 1 FROM actions
-				WHERE user_id = $1
-				  AND note_id IS NULL
-				  AND title = $3
-				  AND COALESCE(output_type, '') = COALESCE($4, '')
-				  AND COALESCE(linked_person_id, 0) = COALESCE($2, 0)
-				  AND created_at >= $5 AND created_at < $6
-			)
-		`, userID, linkedPersonID, title, action.OutputType, start, end); err != nil {
+		if _, err := tx.Exec(ctx, dailyActionInsertSQL, userID, linkedPersonID, title, action.OutputType, start, end); err != nil {
 			return err
 		}
 	}
