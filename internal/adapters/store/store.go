@@ -439,13 +439,13 @@ func (s *Store) RecentWeeklySource(ctx context.Context, userID int64, since time
 const dailyPeopleNoteInsertSQL = `
 	INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review, source_note_ids, idempotency_key)
 	VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8)
-	ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+	ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 `
 
 const dailyActionInsertSQL = `
 	INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type, source_note_ids, idempotency_key)
 	VALUES ($1, NULL, $2::bigint, $3, $4, $5, $6)
-	ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+	ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 `
 
 func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, scopeKey string, parsed models.ParsedNote) error {
