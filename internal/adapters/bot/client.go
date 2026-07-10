@@ -71,6 +71,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	case "/start", "/help":
 		response = helpText()
 	case "/note":
+		response, err = b.svc.CaptureNote(ctx, userID, arg)
+	case "/now":
 		response, err = b.svc.AddNote(ctx, userID, arg)
 	case "/open":
 		response, err = b.svc.OpenActions(ctx, userID)
@@ -93,7 +95,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		response, err = b.svc.Weekly(ctx, userID, utils.HasRefreshFlag(arg))
 	default:
 		// Treat normal text as a quick note to reduce capture friction.
-		response, err = b.svc.AddNote(ctx, userID, text)
+		response, err = b.svc.CaptureNote(ctx, userID, text)
 	}
 	if err != nil {
 		log.Printf("handle command %s: %v", cmd, err)
@@ -160,17 +162,18 @@ func chunks(s string, max int) []string {
 func helpText() string {
 	return `LeadLog Bot
 
-Commands:
-/note <text> — save and structure a messy manager note
-/open — show open loops
-/done <action_id> — mark an action done
-/people — list people and aliases
-/alias <alias> = <canonical_name> — add a lookup alias for a person
-/merge <source_person> = <target_person> — merge duplicate people safely
-/person <name> — show people context for last 90 days
-/ticket <context> — generate Jira-style ticket draft
-/daily — daily manager digest for today
-/weekly — weekly manager digest
+Команди:
+/note <текст> — швидко зберегти сиру нотатку без AI-обробки
+/now <текст> — зберегти й одразу структурувати нотатку
+/open — показати відкриті дії
+/done <action_id> — позначити дію виконаною
+/people — список людей та аліасів
+/alias <аліас> = <канонічне_імʼя> — додати аліас для людини
+/merge <джерело> = <ціль> — безпечно обʼєднати дублікати людей
+/person <імʼя> — контекст щодо людини за останні 90 днів
+/ticket <контекст> — згенерувати чернетку Jira-style ticket
+/daily — денний дайджест менеджера за сьогодні
+/weekly — тижневий дайджест
 
-Tip: you can send plain text without /note. It will be captured as a note.`
+Порада: можна надіслати звичайний текст без /note. Він збережеться як сира нотатка для /daily.`
 }

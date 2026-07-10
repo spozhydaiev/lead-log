@@ -43,6 +43,13 @@ func (s *Service) EnsureUser(ctx context.Context, telegramUserID int64, username
 	return s.store.UpsertUser(ctx, telegramUserID, username)
 }
 
+func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
+	if _, err := s.store.SaveRawNote(ctx, userID, raw); err != nil {
+		return "", err
+	}
+	return "Збережено в нотатки за сьогодні.", nil
+}
+
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
 	parsed, err := s.llm.ParseManagerNote(ctx, raw)
 	if err != nil {

@@ -100,9 +100,10 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 ## Bot commands
 
 - `/start` or `/help` — show help.
-- `/note <text>` — save and structure a manager note.
-- Plain text — save and structure a manager note without typing `/note`.
-- `/open` — show open loops.
+- `/note <text>` — save a raw manager note without immediate AI processing.
+- Plain text — save a raw manager note without typing `/note` and without immediate AI processing.
+- `/now <text>` — save and immediately structure a manager note through the LLM parsing flow.
+- `/open` — show open loops that already exist from immediate processing or other structured processing flows.
 - `/done <action_id>` — mark an open loop as done.
 - `/people` — list people and configured aliases.
 - `/alias <alias> = <canonical_name>` — add a normalized lookup alias for a canonical person. For example, `/alias Andrii = Андрій`.
