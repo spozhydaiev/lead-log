@@ -39,6 +39,9 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
 - `ALLOWED_TELEGRAM_USER_IDS` — comma-separated Telegram user IDs allowed to use the bot. If empty, all users are allowed.
+- `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
+- `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `18:00`.
+- `DAILY_SUMMARY_TIMEZONE` — IANA timezone used for scheduled daily summaries and `/daily` date boundaries. Defaults to `Europe/Warsaw`.
 
 ## Run locally
 
@@ -89,6 +92,10 @@ On startup, the app:
 - records applied filenames in `schema_migrations`.
 
 There is no separate migration command at the moment; migrations run automatically before the Telegram bot starts polling.
+
+## Scheduled daily summaries
+
+Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily summary automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 18:00 in `Europe/Warsaw`. The scheduler reuses the same `Service.Daily` flow as `/daily` and records completed sends so a restart around the scheduled time does not send the same user the same day twice.
 
 ## Bot commands
 
