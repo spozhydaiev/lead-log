@@ -401,8 +401,8 @@ func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name stri
 				n.CreatedAt.Format("2006-01-02"),
 				n.Type,
 				n.Theme,
-				n.Text,
 				n.NoteID,
+				n.Text,
 			))
 		}
 	}

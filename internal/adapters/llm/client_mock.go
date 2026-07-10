@@ -2,11 +2,11 @@ package llm
 
 import (
 	"context"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
-type MockClientLLM struct {
-}
+type MockClientLLM struct{}
 
 func NewMockClientLLM() *MockClientLLM {
 	return &MockClientLLM{}
@@ -41,6 +41,18 @@ func (m *MockClientLLM) GenerateTicket(ctx context.Context, input string) (model
 	return models.TicketDraft{}, nil
 }
 
+func (m *MockClientLLM) SummarizeDaily(ctx context.Context, input string) (string, error) {
+	return input, nil
+}
+
 func (m *MockClientLLM) SummarizeWeekly(ctx context.Context, input string) (string, error) {
 	return input, nil
+}
+
+func (m *MockClientLLM) SummarizePerson(ctx context.Context, input string) (string, error) {
+	return input, nil
+}
+
+func (m *MockClientLLM) Model() string {
+	return "mock"
 }
