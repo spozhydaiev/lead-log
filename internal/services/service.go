@@ -3,13 +3,17 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
 )
@@ -159,7 +163,7 @@ func (s *Service) Person(ctx context.Context, userID int64, name string, refresh
 	}
 
 	since := time.Now().AddDate(0, -3, 0)
-	personName, source, err := s.store.PersonSummarySource(ctx, userID, name, since)
+	_, personName, source, err := s.store.PersonSummarySource(ctx, userID, name, since)
 	if err != nil {
 		return "", err
 	}
@@ -208,6 +212,149 @@ func (s *Service) Person(ctx context.Context, userID int64, name string, refresh
 	}
 
 	return response, nil
+}
+
+func (s *Service) Agenda(ctx context.Context, userID int64, name string, refresh bool) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "Використання: /agenda <імʼя>", nil
+	}
+
+	since := time.Now().AddDate(0, -3, 0)
+	personID, personName, source, err := s.store.PersonSummarySource(ctx, userID, name, since)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "Не знайшов нотаток або дій для цієї людини. Перевірте імʼя або додайте аліас через /alias.", nil
+		}
+		return "", err
+	}
+	if strings.TrimSpace(source) == "" || !strings.Contains(source, "Open actions:") && !strings.Contains(source, "People notes:") {
+		return "Для цієї людини поки немає нотаток або відкритих дій для 1:1 agenda.", nil
+	}
+
+	scopeKey := fmt.Sprintf("person:%d:%s:last_90_days", personID, strings.ToLower(personName))
+	sourceHash := utils.HashStrings(source)
+	now := time.Now()
+
+	if !refresh {
+		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "agenda", scopeKey, sourceHash, PromptVersion)
+		if err != nil {
+			return "", err
+		}
+		if cached != nil {
+			return cached.ResponseText + "\n\n_з кешу. Використайте /agenda " + name + " --refresh, щоб згенерувати заново._", nil
+		}
+	}
+
+	agenda, err := s.llm.GenerateAgenda(ctx, source)
+	if err != nil {
+		return "", err
+	}
+	responseText := FormatAgenda(personName, agenda)
+	responseJSON, err := json.Marshal(agenda)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{
+		UserID:        userID,
+		Kind:          "agenda",
+		ScopeKey:      scopeKey,
+		PeriodStart:   &since,
+		PeriodEnd:     &now,
+		SourceHash:    sourceHash,
+		PromptVersion: PromptVersion,
+		Model:         s.llm.Model(),
+		ResponseText:  responseText,
+		ResponseJSON:  string(responseJSON),
+	}); err != nil {
+		return "", err
+	}
+
+	return responseText, nil
+}
+
+func FormatAgenda(personName string, agenda models.Agenda) string {
+	var b strings.Builder
+	b.WriteString("1:1 agenda — " + personName + "\n")
+	writeAgendaDiscussionSection(&b, "Теми для обговорення", agenda.DiscussionTopics)
+	writeAgendaTextSection(&b, "Open follow-ups", agenda.OpenFollowups)
+	writeAgendaTextSection(&b, "Positive signals to mention", agenda.PositiveSignals)
+	writeAgendaTextSection(&b, "Risks / concerns to clarify", agenda.RisksOrConcernsToClarify)
+	writeAgendaTextSection(&b, "Growth topics", agenda.GrowthTopics)
+	writeAgendaTextSection(&b, "Suggested questions", agenda.SuggestedQuestions)
+	writeAgendaSourcesSection(&b, agenda)
+	return strings.TrimSpace(b.String())
+}
+
+func writeAgendaDiscussionSection(b *strings.Builder, title string, items []models.AgendaDiscussionTopic) {
+	if len(items) == 0 {
+		return
+	}
+	b.WriteString("\n\n" + title + ":\n")
+	for _, item := range items {
+		line := strings.TrimSpace(item.Title)
+		if strings.TrimSpace(item.Context) != "" {
+			line += " — " + strings.TrimSpace(item.Context)
+		}
+		b.WriteString("- " + line + formatSourceNoteIDs(item.SourceNoteIDs) + "\n")
+	}
+}
+
+func writeAgendaTextSection(b *strings.Builder, title string, items []models.AgendaTextItem) {
+	if len(items) == 0 {
+		return
+	}
+	b.WriteString("\n\n" + title + ":\n")
+	for _, item := range items {
+		b.WriteString("- " + strings.TrimSpace(item.Text) + formatSourceNoteIDs(item.SourceNoteIDs) + "\n")
+	}
+}
+
+func writeAgendaSourcesSection(b *strings.Builder, agenda models.Agenda) {
+	ids := agendaSourceNoteIDs(agenda)
+	if len(ids) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, fmt.Sprintf("#%d", id))
+	}
+	b.WriteString("\n\nSource notes:\n- " + strings.Join(parts, ", ") + "\n")
+}
+
+func agendaSourceNoteIDs(agenda models.Agenda) []int64 {
+	seen := map[int64]bool{}
+	for _, item := range agenda.DiscussionTopics {
+		for _, id := range item.SourceNoteIDs {
+			seen[id] = true
+		}
+	}
+	sections := [][]models.AgendaTextItem{agenda.OpenFollowups, agenda.PositiveSignals, agenda.RisksOrConcernsToClarify, agenda.GrowthTopics, agenda.SuggestedQuestions}
+	for _, section := range sections {
+		for _, item := range section {
+			for _, id := range item.SourceNoteIDs {
+				seen[id] = true
+			}
+		}
+	}
+	ids := make([]int64, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+func formatSourceNoteIDs(ids []int64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, fmt.Sprintf("#%d", id))
+	}
+	return " (source notes: " + strings.Join(parts, ", ") + ")"
 }
 
 func (s *Service) Ticket(ctx context.Context, input string) (string, error) {

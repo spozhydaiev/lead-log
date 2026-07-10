@@ -110,6 +110,8 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 - `/merge <source_person> = <target_person>` — merge a duplicate person into the target person, preserving notes and linked actions and saving the source name as an alias. For example, `/merge Andrii = Андрій`.
 - `/person <name>` — show person-specific context for the last 90 days. Aliases resolve to the canonical person.
 - `/person <name> --refresh` — regenerate person context instead of using cache.
+- `/agenda <name>` — generate a concise Ukrainian 1:1 agenda from the person’s existing notes and open actions for the last 90 days. Aliases resolve to the canonical person.
+- `/agenda <name> --refresh` — regenerate the 1:1 agenda instead of using cache without creating new actions or people notes.
 - `/ticket <context>` — generate a Jira-style ticket draft.
 - `/daily` — generate today’s manager digest and persist extracted actions and people notes idempotently.
 - `/daily --refresh` — regenerate today’s digest instead of using cache while avoiding duplicate persisted actions and people notes.

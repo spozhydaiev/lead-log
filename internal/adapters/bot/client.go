@@ -87,6 +87,9 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	case "/person":
 		cleanArg, refresh := utils.StripRefreshFlag(arg)
 		response, err = b.svc.Person(ctx, userID, cleanArg, refresh)
+	case "/agenda":
+		cleanArg, refresh := utils.StripRefreshFlag(arg)
+		response, err = b.svc.Agenda(ctx, userID, cleanArg, refresh)
 	case "/ticket":
 		response, err = b.svc.Ticket(ctx, arg)
 	case "/daily":
@@ -171,6 +174,7 @@ func helpText() string {
 /alias <аліас> = <канонічне_імʼя> — додати аліас для людини
 /merge <джерело> = <ціль> — безпечно обʼєднати дублікати людей
 /person <імʼя> — контекст щодо людини за останні 90 днів
+/agenda <імʼя> — практична agenda для 1:1 за останні 90 днів
 /ticket <контекст> — згенерувати чернетку Jira-style ticket
 /daily — денний дайджест за сьогодні, також структурує дії та нотатки про людей
 /weekly — тижневий дайджест

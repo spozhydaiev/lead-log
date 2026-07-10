@@ -36,24 +36,27 @@ type TicketDraft struct {
 }
 
 type Action struct {
-	ID         int64
-	Title      string
-	Status     string
-	OutputType string
-	CreatedAt  time.Time
-	PersonName *string
+	ID            int64
+	Title         string
+	Status        string
+	OutputType    string
+	CreatedAt     time.Time
+	PersonName    *string
+	SourceNoteIDs []int64
 }
 
 type PersonContext struct {
+	PersonID   int64
 	PersonName string
 	Notes      []PersonContextNote
 	Actions    []Action
 }
 
 type PersonContextNote struct {
-	Type      string
-	Theme     string
-	Text      string
-	NoteID    int64
-	CreatedAt time.Time
+	Type          string
+	Theme         string
+	Text          string
+	NoteID        int64
+	SourceNoteIDs []int64
+	CreatedAt     time.Time
 }
