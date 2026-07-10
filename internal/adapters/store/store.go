@@ -33,6 +33,16 @@ func (s *Store) UpsertUser(ctx context.Context, telegramUserID int64, username s
 	return id, err
 }
 
+func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int64, error) {
+	var noteID int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO notes (user_id, raw_text)
+		VALUES ($1, $2)
+		RETURNING id
+	`, userID, raw).Scan(&noteID)
+	return noteID, err
+}
+
 func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, parsed models.ParsedNote) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
