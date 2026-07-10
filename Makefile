@@ -1,5 +1,5 @@
 run:
-	go run ./cmd/bot
+	go run ./cmd/lead-log
 
 fmt:
 	gofmt -w ./cmd/lead-log ./internal ./pkg
