@@ -2,8 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -433,35 +437,20 @@ func (s *Store) RecentWeeklySource(ctx context.Context, userID int64, since time
 }
 
 const dailyPeopleNoteInsertSQL = `
-	INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review)
-	SELECT $1, $2, NULL, $3, $4, $5, $6
-	WHERE NOT EXISTS (
-		SELECT 1 FROM people_notes
-		WHERE user_id = $1
-		  AND person_id = $2
-		  AND note_id IS NULL
-		  AND type = $3
-		  AND COALESCE(theme, '') = COALESCE($4, '')
-		  AND text = $5
-		  AND created_at >= $7 AND created_at < $8
-	)
+	INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review, source_note_ids, idempotency_key)
+	VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8)
+	ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 `
 
 const dailyActionInsertSQL = `
-	INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type)
-	SELECT $1, NULL, $2::bigint, $3, $4
-	WHERE NOT EXISTS (
-		SELECT 1 FROM actions
-		WHERE user_id = $1
-		  AND note_id IS NULL
-		  AND title = $3
-		  AND COALESCE(output_type, '') = COALESCE($4, '')
-		  AND COALESCE(linked_person_id, 0::bigint) = COALESCE($2::bigint, 0::bigint)
-		  AND created_at >= $5 AND created_at < $6
-	)
+	INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type, source_note_ids, idempotency_key)
+	VALUES ($1, NULL, $2::bigint, $3, $4, $5, $6)
+	ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 `
 
-func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, parsed models.ParsedNote) error {
+func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, scopeKey string, parsed models.ParsedNote) error {
+	_ = start
+	_ = end
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -505,7 +494,8 @@ func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start,
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, dailyPeopleNoteInsertSQL, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, start, end); err != nil {
+		key := dailyItemIdempotencyKey(userID, "people_note", scopeKey, pn.SourceNoteIDs, NormalizePersonName(name), "", text)
+		if _, err := tx.Exec(ctx, dailyPeopleNoteInsertSQL, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, sortedInt64s(pn.SourceNoteIDs), key); err != nil {
 			return err
 		}
 	}
@@ -523,7 +513,8 @@ func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start,
 			}
 			linkedPersonID = &pid
 		}
-		if _, err := tx.Exec(ctx, dailyActionInsertSQL, userID, linkedPersonID, title, action.OutputType, start, end); err != nil {
+		key := dailyItemIdempotencyKey(userID, "action", scopeKey, action.SourceNoteIDs, NormalizePersonName(action.LinkedPersonName), action.OutputType, title)
+		if _, err := tx.Exec(ctx, dailyActionInsertSQL, userID, linkedPersonID, title, action.OutputType, sortedInt64s(action.SourceNoteIDs), key); err != nil {
 			return err
 		}
 	}
@@ -718,4 +709,34 @@ func addAlias(ctx context.Context, tx pgx.Tx, userID, personID int64, alias stri
 		DO UPDATE SET person_id = EXCLUDED.person_id, alias = EXCLUDED.alias
 	`, userID, personID, alias, normalized)
 	return err
+}
+
+var repeatedSpace = regexp.MustCompile(`\s+`)
+
+func dailyItemIdempotencyKey(userID int64, kind, scopeKey string, sourceNoteIDs []int64, linkedPersonKey, outputType, text string) string {
+	ids := sortedInt64s(sourceNoteIDs)
+	parts := []string{fmt.Sprintf("user:%d", userID), "kind:" + normalizeDailyKeyPart(kind), "scope:" + normalizeDailyKeyPart(scopeKey), "person:" + normalizeDailyKeyPart(linkedPersonKey), "output:" + normalizeDailyKeyPart(outputType)}
+	if len(ids) > 0 {
+		parts = append(parts, "source_notes:"+fmt.Sprint(ids))
+	} else {
+		parts = append(parts, "text:"+normalizeDailyKeyPart(text))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeDailyKeyPart(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = repeatedSpace.ReplaceAllString(s, " ")
+	s = strings.TrimRight(s, ".,;:!?…")
+	return strings.TrimSpace(s)
+}
+
+func sortedInt64s(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := append([]int64(nil), ids...)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }

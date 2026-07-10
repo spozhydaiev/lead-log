@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS actions (
                                        status TEXT NOT NULL DEFAULT 'open',
                                        due_at TIMESTAMPTZ,
                                        output_type TEXT,
+                                       source_note_ids BIGINT[] NOT NULL DEFAULT '{}',
+                                       idempotency_key TEXT,
                                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                                        completed_at TIMESTAMPTZ
 );
@@ -48,10 +50,14 @@ CREATE TABLE IF NOT EXISTS people_notes (
                                             theme TEXT,
                                             text TEXT NOT NULL,
                                             include_in_review BOOLEAN NOT NULL DEFAULT true,
+                                            source_note_ids BIGINT[] NOT NULL DEFAULT '{}',
+                                            idempotency_key TEXT,
                                             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_user_created ON notes(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_actions_user_status ON actions(user_id, status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_idempotency_key ON actions(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_people_notes_person_created ON people_notes(person_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_people_notes_idempotency_key ON people_notes(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_people_name_trgm ON people USING gin (name gin_trgm_ops);

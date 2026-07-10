@@ -33,3 +33,17 @@ func TestFormatDailyDigestOmitsEmptySections(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestDailyDigestToParsedNoteCarriesSourceNoteIDs(t *testing.T) {
+	owner := "Олена"
+	parsed := dailyDigestToParsedNote(models.DailyDigest{
+		OpenLoops:        []models.DailyOpenLoop{{Title: "Уточнити ETA", Owner: &owner, SourceNoteIDs: []int64{3, 1}}},
+		PeopleHighlights: []models.DailyPeopleHighlight{{PersonName: "Олена", Type: "commitment", Theme: "delivery", Text: "Пообіцяла оновити ETA.", SourceNoteIDs: []int64{3}}},
+	})
+	if got := parsed.Actions[0].SourceNoteIDs; len(got) != 2 || got[0] != 3 || got[1] != 1 {
+		t.Fatalf("action source note ids were not preserved: %#v", got)
+	}
+	if got := parsed.PeopleNotes[0].SourceNoteIDs; len(got) != 1 || got[0] != 3 {
+		t.Fatalf("people note source note ids were not preserved: %#v", got)
+	}
+}

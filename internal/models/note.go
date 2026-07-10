@@ -13,17 +13,19 @@ type ParsedNote struct {
 }
 
 type ParsedAction struct {
-	Title            string `json:"title"`
-	LinkedPersonName string `json:"linked_person_name,omitempty"`
-	OutputType       string `json:"output_type,omitempty"` // ticket, meeting, message, reminder
+	Title            string  `json:"title"`
+	LinkedPersonName string  `json:"linked_person_name,omitempty"`
+	OutputType       string  `json:"output_type,omitempty"` // ticket, meeting, message, reminder
+	SourceNoteIDs    []int64 `json:"source_note_ids,omitempty"`
 }
 
 type ParsedPeopleNote struct {
-	PersonName      string `json:"person_name"`
-	Type            string `json:"type"`  // positive_signal, concern, growth_topic, context, follow_up_needed, commitment, decision, risk, blocker, review_evidence
-	Theme           string `json:"theme"` // ownership, communication, delivery, collaboration, technical_quality, reliability, mentorship, process
-	Text            string `json:"text"`
-	IncludeInReview bool   `json:"include_in_review"`
+	PersonName      string  `json:"person_name"`
+	Type            string  `json:"type"`  // positive_signal, concern, growth_topic, context, follow_up_needed, commitment, decision, risk, blocker, review_evidence
+	Theme           string  `json:"theme"` // ownership, communication, delivery, collaboration, technical_quality, reliability, mentorship, process
+	Text            string  `json:"text"`
+	IncludeInReview bool    `json:"include_in_review"`
+	SourceNoteIDs   []int64 `json:"source_note_ids,omitempty"`
 }
 
 type TicketDraft struct {

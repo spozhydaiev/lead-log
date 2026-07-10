@@ -265,7 +265,7 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 					return "", err
 				}
 				if ok {
-					if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, parsed); err != nil {
+					if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, scopeKey, parsed); err != nil {
 						return "", err
 					}
 				}
@@ -284,7 +284,7 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		return "", err
 	}
 
-	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, dailyDigestToParsedNote(digest)); err != nil {
+	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, scopeKey, dailyDigestToParsedNote(digest)); err != nil {
 		return "", err
 	}
 
