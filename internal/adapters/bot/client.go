@@ -113,7 +113,17 @@ func splitCommand(text string) (string, string) {
 	return cmd, arg
 }
 
+func (b *Bot) SendMessage(chatID int64, text string) error {
+	return b.send(chatID, text)
+}
+
 func (b *Bot) reply(chatID int64, text string) {
+	if err := b.send(chatID, text); err != nil {
+		log.Printf("send message: %v", err)
+	}
+}
+
+func (b *Bot) send(chatID int64, text string) error {
 	if strings.TrimSpace(text) == "" {
 		text = "Done."
 	}
@@ -121,9 +131,10 @@ func (b *Bot) reply(chatID int64, text string) {
 		msg := tgbotapi.NewMessage(chatID, chunk)
 		msg.DisableWebPagePreview = true
 		if _, err := b.api.Send(msg); err != nil {
-			log.Printf("send message: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 func chunks(s string, max int) []string {

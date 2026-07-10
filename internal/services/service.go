@@ -16,12 +16,27 @@ import (
 const PromptVersion = "v1"
 
 type Service struct {
-	store *store.Store
-	llm   llm.ClientLLM
+	store         *store.Store
+	llm           llm.ClientLLM
+	dailyLocation *time.Location
 }
 
-func New(store *store.Store, llm llm.ClientLLM) *Service {
-	return &Service{store: store, llm: llm}
+func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
+	s := &Service{store: store, llm: llm, dailyLocation: time.Local}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+type Option func(*Service)
+
+func WithDailyLocation(loc *time.Location) Option {
+	return func(s *Service) {
+		if loc != nil {
+			s.dailyLocation = loc
+		}
+	}
 }
 
 func (s *Service) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -146,11 +161,19 @@ func (s *Service) Ticket(ctx context.Context, input string) (string, error) {
 }
 
 func (s *Service) Daily(ctx context.Context, userID int64, refresh bool) (string, error) {
-	now := time.Now()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return s.DailyAt(ctx, userID, time.Now(), refresh)
+}
+
+func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refresh bool) (string, error) {
+	loc := s.dailyLocation
+	if loc == nil {
+		loc = time.Local
+	}
+	localNow := now.In(loc)
+	startOfDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
 	endOfDay := startOfDay.AddDate(0, 0, 1)
 
-	source, err := s.store.RecentDailySource(ctx, userID, startOfDay)
+	source, err := s.store.RecentDailySource(ctx, userID, startOfDay, endOfDay)
 	if err != nil {
 		return "", err
 	}

@@ -220,13 +220,13 @@ func (s *Store) ListOpenActionsForPerson(ctx context.Context, userID, personID i
 	return result, rows.Err()
 }
 
-func (s *Store) RecentDailySource(ctx context.Context, userID int64, since time.Time) (string, error) {
+func (s *Store) RecentDailySource(ctx context.Context, userID int64, since, before time.Time) (string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT n.id, n.created_at, n.raw_text, COALESCE(n.summary, '')
 		FROM notes n
-		WHERE n.user_id = $1 AND n.created_at >= $2
+		WHERE n.user_id = $1 AND n.created_at >= $2 AND n.created_at < $3
 		ORDER BY n.created_at ASC
-	`, userID, since)
+	`, userID, since, before)
 	if err != nil {
 		return "", err
 	}
@@ -408,4 +408,25 @@ func (s *Store) PersonSummarySource(ctx context.Context, userID int64, name stri
 	}
 
 	return pc.PersonName, b.String(), nil
+}
+
+func (s *Store) HasDailySummarySend(ctx context.Context, userID int64, scopeKey string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM daily_summary_sends
+			WHERE user_id = $1 AND scope_key = $2
+		)
+	`, userID, scopeKey).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) RecordDailySummarySend(ctx context.Context, userID int64, scopeKey string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO daily_summary_sends (user_id, scope_key)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id, scope_key) DO NOTHING
+	`, userID, scopeKey)
+	return err
 }
