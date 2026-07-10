@@ -74,6 +74,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		response, err = b.svc.AddNote(ctx, userID, arg)
 	case "/open":
 		response, err = b.svc.OpenActions(ctx, userID)
+	case "/people":
+		response, err = b.svc.People(ctx, userID)
+	case "/alias":
+		response, err = b.svc.Alias(ctx, userID, arg)
+	case "/merge":
+		response, err = b.svc.Merge(ctx, userID, arg)
 	case "/done":
 		response, err = b.svc.Done(ctx, userID, arg)
 	case "/person":
@@ -158,6 +164,9 @@ Commands:
 /note <text> — save and structure a messy manager note
 /open — show open loops
 /done <action_id> — mark an action done
+/people — list people and aliases
+/alias <alias> = <canonical_name> — add a lookup alias for a person
+/merge <source_person> = <target_person> — merge duplicate people safely
 /person <name> — show people context for last 90 days
 /ticket <context> — generate Jira-style ticket draft
 /daily — daily manager digest for today

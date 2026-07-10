@@ -90,6 +90,60 @@ func (s *Service) Done(ctx context.Context, userID int64, arg string) (string, e
 	return fmt.Sprintf("Marked action %d as done.", id), nil
 }
 
+func (s *Service) People(ctx context.Context, userID int64) (string, error) {
+	people, err := s.store.ListPeople(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if len(people) == 0 {
+		return "No people yet.", nil
+	}
+	var b strings.Builder
+	b.WriteString("People:\n")
+	for _, p := range people {
+		b.WriteString("- " + p.Name)
+		if len(p.Aliases) > 0 {
+			b.WriteString(" (aliases: " + strings.Join(p.Aliases, ", ") + ")")
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+
+func (s *Service) Alias(ctx context.Context, userID int64, arg string) (string, error) {
+	left, right, ok := splitEqualsArg(arg)
+	if !ok {
+		return "Usage: /alias <alias> = <canonical_name>", nil
+	}
+	canonicalName, err := s.store.AddPersonAlias(ctx, userID, left, right)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Added alias %q for %q.", left, canonicalName), nil
+}
+
+func (s *Service) Merge(ctx context.Context, userID int64, arg string) (string, error) {
+	left, right, ok := splitEqualsArg(arg)
+	if !ok {
+		return "Usage: /merge <source_person> = <target_person>", nil
+	}
+	targetName, err := s.store.MergePeople(ctx, userID, left, right)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Merged %q into %q.", left, targetName), nil
+}
+
+func splitEqualsArg(arg string) (string, string, bool) {
+	parts := strings.SplitN(arg, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(parts[0])
+	right := strings.TrimSpace(parts[1])
+	return left, right, left != "" && right != ""
+}
+
 func (s *Service) Person(ctx context.Context, userID int64, name string, refresh bool) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
