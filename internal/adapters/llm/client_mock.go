@@ -41,12 +41,13 @@ func (m *MockClientLLM) GenerateTicket(ctx context.Context, input string) (model
 	return models.TicketDraft{}, nil
 }
 
-func (m *MockClientLLM) ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error) {
-	parsed, err := m.ParseManagerNote(ctx, input)
-	if err != nil {
-		return models.DailyProcessingResult{}, err
-	}
-	return models.DailyProcessingResult{SummaryText: input, Structured: parsed}, nil
+func (m *MockClientLLM) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
+	owner := "Person name"
+	return models.DailyDigest{
+		ShortSummary:     "Короткий підсумок дня.",
+		OpenLoops:        []models.DailyOpenLoop{{Title: "Title", Owner: &owner, SourceNoteIDs: []int64{1}}},
+		PeopleHighlights: []models.DailyPeopleHighlight{{PersonName: owner, Type: "context", Theme: "other", Text: "Нотатка про контекст.", SourceNoteIDs: []int64{1}}},
+	}, nil
 }
 
 func (m *MockClientLLM) SummarizeWeekly(ctx context.Context, input string) (string, error) {

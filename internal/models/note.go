@@ -12,11 +12,6 @@ type ParsedNote struct {
 	SuggestedQuestions []string           `json:"suggested_questions"`
 }
 
-type DailyProcessingResult struct {
-	SummaryText string     `json:"summary_text"`
-	Structured  ParsedNote `json:"structured"`
-}
-
 type ParsedAction struct {
 	Title            string `json:"title"`
 	LinkedPersonName string `json:"linked_person_name,omitempty"`
