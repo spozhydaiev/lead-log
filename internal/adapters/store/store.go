@@ -59,7 +59,7 @@ func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, pa
 		if err != nil {
 			return 0, err
 		}
-		personIDs[strings.ToLower(name)] = pid
+		personIDs[NormalizePersonName(name)] = pid
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -75,7 +75,7 @@ func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, pa
 		}
 		var linkedPersonID *int64
 		if action.LinkedPersonName != "" {
-			key := strings.ToLower(strings.TrimSpace(action.LinkedPersonName))
+			key := NormalizePersonName(action.LinkedPersonName)
 			pid, ok := personIDs[key]
 			if !ok {
 				pid, err = upsertPerson(ctx, tx, userID, action.LinkedPersonName)
@@ -101,14 +101,41 @@ func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, pa
 
 func upsertPerson(ctx context.Context, tx pgx.Tx, userID int64, name string) (int64, error) {
 	name = strings.TrimSpace(name)
+	normalized := NormalizePersonName(name)
+	if normalized == "" {
+		return 0, fmt.Errorf("person name is empty")
+	}
+
 	var id int64
 	err := tx.QueryRow(ctx, `
+		SELECT person_id
+		FROM person_aliases
+		WHERE user_id = $1 AND normalized_alias = $2
+		LIMIT 1
+	`, userID, normalized).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+
+	err = tx.QueryRow(ctx, `
 		INSERT INTO people (user_id, name)
 		VALUES ($1, $2)
 		ON CONFLICT (user_id, name)
 		DO UPDATE SET name = EXCLUDED.name
 		RETURNING id
 	`, userID, name).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO person_aliases (user_id, person_id, alias, normalized_alias)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, normalized_alias) DO NOTHING
+	`, userID, id, name, normalized)
 	return id, err
 }
 
@@ -158,11 +185,13 @@ func (s *Store) GetPersonContext(ctx context.Context, userID int64, name string,
 	var personID int64
 	var canonicalName string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name
-		FROM people
-		WHERE user_id = $1 AND lower(name) = lower($2)
+		SELECT p.id, p.name
+		FROM people p
+		LEFT JOIN person_aliases pa ON pa.person_id = p.id
+		WHERE p.user_id = $1
+		  AND (pa.normalized_alias = $2)
 		LIMIT 1
-	`, userID, strings.TrimSpace(name)).Scan(&personID, &canonicalName)
+	`, userID, NormalizePersonName(name)).Scan(&personID, &canonicalName)
 	if err != nil {
 		return models.PersonContext{}, err
 	}
@@ -218,6 +247,129 @@ func (s *Store) ListOpenActionsForPerson(ctx context.Context, userID, personID i
 		result = append(result, a)
 	}
 	return result, rows.Err()
+}
+
+type PersonListItem struct {
+	ID      int64
+	Name    string
+	Aliases []string
+}
+
+func (s *Store) ListPeople(ctx context.Context, userID int64) ([]PersonListItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id, p.name, COALESCE(array_remove(array_agg(pa.alias ORDER BY pa.alias), NULL), '{}')
+		FROM people p
+		LEFT JOIN person_aliases pa
+		  ON pa.person_id = p.id
+		 AND pa.normalized_alias <> lower(regexp_replace(trim(p.name), '\s+', ' ', 'g'))
+		WHERE p.user_id = $1
+		GROUP BY p.id, p.name
+		ORDER BY lower(p.name)
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var people []PersonListItem
+	for rows.Next() {
+		var p PersonListItem
+		if err := rows.Scan(&p.ID, &p.Name, &p.Aliases); err != nil {
+			return nil, err
+		}
+		people = append(people, p)
+	}
+	return people, rows.Err()
+}
+
+func (s *Store) AddPersonAlias(ctx context.Context, userID int64, alias, canonicalName string) (string, error) {
+	alias = strings.TrimSpace(alias)
+	canonicalName = strings.TrimSpace(canonicalName)
+	if alias == "" || canonicalName == "" {
+		return "", fmt.Errorf("alias and canonical name are required")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
+	personID, err := upsertPerson(ctx, tx, userID, canonicalName)
+	if err != nil {
+		return "", err
+	}
+	if err := addAlias(ctx, tx, userID, personID, alias); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return canonicalName, nil
+}
+
+func (s *Store) MergePeople(ctx context.Context, userID int64, sourceName, targetName string) (string, error) {
+	sourceName = strings.TrimSpace(sourceName)
+	targetName = strings.TrimSpace(targetName)
+	if sourceName == "" || targetName == "" {
+		return "", fmt.Errorf("source and target person are required")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
+	sourceID, sourceCanonical, err := findPerson(ctx, tx, userID, sourceName)
+	if err != nil {
+		return "", fmt.Errorf("source person not found: %w", err)
+	}
+	targetID, err := upsertPerson(ctx, tx, userID, targetName)
+	if err != nil {
+		return "", err
+	}
+	if sourceID == targetID {
+		if err := addAlias(ctx, tx, userID, targetID, sourceName); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return targetName, nil
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE people_notes SET person_id = $1 WHERE user_id = $2 AND person_id = $3`, targetID, userID, sourceID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE actions SET linked_person_id = $1 WHERE user_id = $2 AND linked_person_id = $3`, targetID, userID, sourceID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO person_aliases (user_id, person_id, alias, normalized_alias)
+		SELECT user_id, $1, alias, normalized_alias
+		FROM person_aliases
+		WHERE user_id = $2 AND person_id = $3
+		ON CONFLICT (user_id, normalized_alias) DO NOTHING
+	`, targetID, userID, sourceID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM person_aliases WHERE user_id = $1 AND person_id = $2`, userID, sourceID); err != nil {
+		return "", err
+	}
+	if err := addAlias(ctx, tx, userID, targetID, sourceCanonical); err != nil {
+		return "", err
+	}
+	if err := addAlias(ctx, tx, userID, targetID, sourceName); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM people WHERE user_id = $1 AND id = $2`, userID, sourceID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return targetName, nil
 }
 
 func (s *Store) RecentDailySource(ctx context.Context, userID int64, since, before time.Time) (string, error) {
@@ -428,5 +580,33 @@ func (s *Store) RecordDailySummarySend(ctx context.Context, userID int64, scopeK
 		VALUES ($1, $2)
 		ON CONFLICT (user_id, scope_key) DO NOTHING
 	`, userID, scopeKey)
+	return err
+}
+
+func findPerson(ctx context.Context, tx pgx.Tx, userID int64, name string) (int64, string, error) {
+	var id int64
+	var canonicalName string
+	err := tx.QueryRow(ctx, `
+		SELECT p.id, p.name
+		FROM people p
+		LEFT JOIN person_aliases pa ON pa.person_id = p.id
+		WHERE p.user_id = $1 AND (pa.normalized_alias = $2 OR lower(p.name) = $2)
+		LIMIT 1
+	`, userID, NormalizePersonName(name)).Scan(&id, &canonicalName)
+	return id, canonicalName, err
+}
+
+func addAlias(ctx context.Context, tx pgx.Tx, userID, personID int64, alias string) error {
+	alias = strings.TrimSpace(alias)
+	normalized := NormalizePersonName(alias)
+	if normalized == "" {
+		return fmt.Errorf("alias is empty")
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO person_aliases (user_id, person_id, alias, normalized_alias)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, normalized_alias)
+		DO UPDATE SET person_id = EXCLUDED.person_id, alias = EXCLUDED.alias
+	`, userID, personID, alias, normalized)
 	return err
 }

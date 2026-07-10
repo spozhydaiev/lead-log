@@ -104,7 +104,10 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 - Plain text — save and structure a manager note without typing `/note`.
 - `/open` — show open loops.
 - `/done <action_id>` — mark an open loop as done.
-- `/person <name>` — show person-specific context for the last 90 days.
+- `/people` — list people and configured aliases.
+- `/alias <alias> = <canonical_name>` — add a normalized lookup alias for a canonical person. For example, `/alias Andrii = Андрій`.
+- `/merge <source_person> = <target_person>` — merge a duplicate person into the target person, preserving notes and linked actions and saving the source name as an alias. For example, `/merge Andrii = Андрій`.
+- `/person <name>` — show person-specific context for the last 90 days. Aliases resolve to the canonical person.
 - `/person <name> --refresh` — regenerate person context instead of using cache.
 - `/ticket <context>` — generate a Jira-style ticket draft.
 - `/daily` — generate today’s manager digest.
