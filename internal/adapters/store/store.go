@@ -432,6 +432,101 @@ func (s *Store) RecentWeeklySource(ctx context.Context, userID int64, since time
 	return b.String(), rows.Err()
 }
 
+func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, parsed models.ParsedNote) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	personIDs := map[string]int64{}
+	ensurePerson := func(name string) (int64, error) {
+		name = strings.TrimSpace(name)
+		key := NormalizePersonName(name)
+		if key == "" {
+			return 0, fmt.Errorf("person name is empty")
+		}
+		if id, ok := personIDs[key]; ok {
+			return id, nil
+		}
+		id, err := upsertPerson(ctx, tx, userID, name)
+		if err != nil {
+			return 0, err
+		}
+		personIDs[key] = id
+		return id, nil
+	}
+
+	for _, name := range parsed.PeopleMentioned {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		if _, err := ensurePerson(name); err != nil {
+			return err
+		}
+	}
+
+	for _, pn := range parsed.PeopleNotes {
+		name := strings.TrimSpace(pn.PersonName)
+		text := strings.TrimSpace(pn.Text)
+		if name == "" || text == "" {
+			continue
+		}
+		pid, err := ensurePerson(name)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review)
+			SELECT $1, $2, NULL, $3, $4, $5, $6
+			WHERE NOT EXISTS (
+				SELECT 1 FROM people_notes
+				WHERE user_id = $1
+				  AND person_id = $2
+				  AND note_id IS NULL
+				  AND type = $3
+				  AND COALESCE(theme, '') = COALESCE($4, '')
+				  AND text = $5
+				  AND created_at >= $7 AND created_at < $8
+			)
+		`, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, start, end); err != nil {
+			return err
+		}
+	}
+
+	for _, action := range parsed.Actions {
+		title := strings.TrimSpace(action.Title)
+		if title == "" {
+			continue
+		}
+		var linkedPersonID *int64
+		if strings.TrimSpace(action.LinkedPersonName) != "" {
+			pid, err := ensurePerson(action.LinkedPersonName)
+			if err != nil {
+				return err
+			}
+			linkedPersonID = &pid
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type)
+			SELECT $1, NULL, $2, $3, $4
+			WHERE NOT EXISTS (
+				SELECT 1 FROM actions
+				WHERE user_id = $1
+				  AND note_id IS NULL
+				  AND title = $3
+				  AND COALESCE(output_type, '') = COALESCE($4, '')
+				  AND COALESCE(linked_person_id, 0) = COALESCE($2, 0)
+				  AND created_at >= $5 AND created_at < $6
+			)
+		`, userID, linkedPersonID, title, action.OutputType, start, end); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
 func emptyTo(v, fallback string) string {
 	if strings.TrimSpace(v) == "" {
 		return fallback

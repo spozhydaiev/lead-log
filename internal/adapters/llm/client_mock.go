@@ -41,8 +41,12 @@ func (m *MockClientLLM) GenerateTicket(ctx context.Context, input string) (model
 	return models.TicketDraft{}, nil
 }
 
-func (m *MockClientLLM) SummarizeDaily(ctx context.Context, input string) (string, error) {
-	return input, nil
+func (m *MockClientLLM) ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error) {
+	parsed, err := m.ParseManagerNote(ctx, input)
+	if err != nil {
+		return models.DailyProcessingResult{}, err
+	}
+	return models.DailyProcessingResult{SummaryText: input, Structured: parsed}, nil
 }
 
 func (m *MockClientLLM) SummarizeWeekly(ctx context.Context, input string) (string, error) {

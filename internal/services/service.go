@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -68,10 +69,10 @@ func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error)
 		return "", err
 	}
 	if len(actions) == 0 {
-		return "No open loops 🎉", nil
+		return "Відкритих дій немає 🎉", nil
 	}
 	var b strings.Builder
-	b.WriteString("Open loops:\n")
+	b.WriteString("Відкриті дії:\n")
 	for _, a := range actions {
 		person := ""
 		if a.PersonName != nil {
@@ -89,12 +90,12 @@ func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error)
 func (s *Service) Done(ctx context.Context, userID int64, arg string) (string, error) {
 	id, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
 	if err != nil {
-		return "Usage: /done <action_id>", nil
+		return "Використання: /done <action_id>", nil
 	}
 	if err := s.store.MarkActionDone(ctx, userID, id); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Marked action %d as done.", id), nil
+	return fmt.Sprintf("Позначено дію %d як виконану.", id), nil
 }
 
 func (s *Service) People(ctx context.Context, userID int64) (string, error) {
@@ -103,14 +104,14 @@ func (s *Service) People(ctx context.Context, userID int64) (string, error) {
 		return "", err
 	}
 	if len(people) == 0 {
-		return "No people yet.", nil
+		return "Людей ще немає.", nil
 	}
 	var b strings.Builder
-	b.WriteString("People:\n")
+	b.WriteString("Люди:\n")
 	for _, p := range people {
 		b.WriteString("- " + p.Name)
 		if len(p.Aliases) > 0 {
-			b.WriteString(" (aliases: " + strings.Join(p.Aliases, ", ") + ")")
+			b.WriteString(" (аліаси: " + strings.Join(p.Aliases, ", ") + ")")
 		}
 		b.WriteString("\n")
 	}
@@ -239,7 +240,7 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		return "", err
 	}
 	if strings.TrimSpace(source) == "" {
-		return "No notes for today.", nil
+		return "За сьогодні нотаток немає.", nil
 	}
 
 	scopeKey := startOfDay.Format("2006-01-02")
@@ -258,12 +259,35 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 			return "", err
 		}
 		if cached != nil {
-			return cached.ResponseText + "\n\n_cached. Use /daily --refresh to regenerate._", nil
+			if strings.TrimSpace(cached.ResponseJSON) != "" {
+				var result models.DailyProcessingResult
+				if err := json.Unmarshal([]byte(cached.ResponseJSON), &result); err != nil {
+					return "", err
+				}
+				if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, result.Structured); err != nil {
+					return "", err
+				}
+			}
+			return cached.ResponseText + "\n\n_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", nil
 		}
 	}
 
-	response, err := s.llm.SummarizeDaily(ctx, source)
+	result, err := s.llm.ProcessDaily(ctx, source)
 	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(result.SummaryText) == "" {
+		result.SummaryText = result.Structured.Summary
+	}
+	if strings.TrimSpace(result.SummaryText) == "" {
+		result.SummaryText = "Денний підсумок готовий, але модель не повернула текст дайджесту."
+	}
+	responseJSON, err := json.Marshal(result)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, result.Structured); err != nil {
 		return "", err
 	}
 
@@ -276,12 +300,13 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		SourceHash:    sourceHash,
 		PromptVersion: PromptVersion,
 		Model:         s.llm.Model(),
-		ResponseText:  response,
+		ResponseText:  result.SummaryText,
+		ResponseJSON:  string(responseJSON),
 	}); err != nil {
 		return "", err
 	}
 
-	return response, nil
+	return result.SummaryText, nil
 }
 
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
