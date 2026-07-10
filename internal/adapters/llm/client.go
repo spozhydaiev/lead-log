@@ -17,7 +17,7 @@ import (
 type ClientLLM interface {
 	ParseManagerNote(ctx context.Context, raw string) (models.ParsedNote, error)
 	GenerateTicket(ctx context.Context, input string) (models.TicketDraft, error)
-	SummarizeDaily(ctx context.Context, input string) (string, error)
+	ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error)
 	SummarizeWeekly(ctx context.Context, input string) (string, error)
 	Model() string
 	SummarizePerson(ctx context.Context, input string) (string, error)
@@ -111,9 +111,17 @@ func (c *Client) GenerateTicket(ctx context.Context, input string) (models.Ticke
 	return draft, nil
 }
 
-func (c *Client) SummarizeDaily(ctx context.Context, input string) (string, error) {
+func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error) {
 	prompt := dailyPrompt() + "\n\nSource notes/actions:\n" + input
-	return c.chatText(ctx, prompt)
+	content, err := c.chatJSON(ctx, prompt)
+	if err != nil {
+		return models.DailyProcessingResult{}, err
+	}
+	var result models.DailyProcessingResult
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return models.DailyProcessingResult{}, fmt.Errorf("parse daily json: %w; content=%s", err, content)
+	}
+	return result, nil
 }
 
 func (c *Client) SummarizeWeekly(ctx context.Context, input string) (string, error) {
@@ -249,6 +257,32 @@ Focus on:
 5. Suggested 1:1 topics
 6. Questions or unclear items that need confirmation
 Keep it concise, practical, and source-bound. Include note numbers when useful.
+
+Return valid JSON only with this shape:
+{
+  "summary_text": "Ukrainian user-facing daily digest",
+  "structured": {
+    "summary": "short neutral summary",
+    "tags": ["short_tags"],
+    "actions": [
+      {"title": "action title", "linked_person_name": "optional", "output_type": "ticket|meeting|message|reminder|"}
+    ],
+    "people_notes": [
+      {
+        "person_name": "name",
+        "type": "positive_signal|concern|growth_topic|context|follow_up_needed|commitment|decision|risk|blocker|review_evidence",
+        "theme": "ownership|communication|delivery|collaboration|technical_quality|reliability|mentorship|process|",
+        "text": "neutral source-bound note",
+        "include_in_review": true
+      }
+    ],
+    "people_mentioned": ["name"],
+    "ticket_drafts": [
+      {"title": "", "context": "", "problem": "", "acceptance_criteria": [""]}
+    ],
+    "suggested_questions": ["clarifying questions if useful"]
+  }
+}
 `
 }
 

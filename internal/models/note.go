@@ -7,8 +7,14 @@ type ParsedNote struct {
 	Tags               []string           `json:"tags"`
 	Actions            []ParsedAction     `json:"actions"`
 	PeopleNotes        []ParsedPeopleNote `json:"people_notes"`
+	PeopleMentioned    []string           `json:"people_mentioned"`
 	TicketDrafts       []TicketDraft      `json:"ticket_drafts"`
 	SuggestedQuestions []string           `json:"suggested_questions"`
+}
+
+type DailyProcessingResult struct {
+	SummaryText string     `json:"summary_text"`
+	Structured  ParsedNote `json:"structured"`
 }
 
 type ParsedAction struct {
