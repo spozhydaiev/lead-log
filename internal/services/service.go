@@ -260,34 +260,31 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		}
 		if cached != nil {
 			if strings.TrimSpace(cached.ResponseJSON) != "" {
-				var result models.DailyProcessingResult
-				if err := json.Unmarshal([]byte(cached.ResponseJSON), &result); err != nil {
+				parsed, ok, err := cachedDailyStructured(cached.ResponseJSON)
+				if err != nil {
 					return "", err
 				}
-				if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, result.Structured); err != nil {
-					return "", err
+				if ok {
+					if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, parsed); err != nil {
+						return "", err
+					}
 				}
 			}
 			return cached.ResponseText + "\n\n_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", nil
 		}
 	}
 
-	result, err := s.llm.ProcessDaily(ctx, source)
+	digest, err := s.llm.ProcessDaily(ctx, source)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(result.SummaryText) == "" {
-		result.SummaryText = result.Structured.Summary
-	}
-	if strings.TrimSpace(result.SummaryText) == "" {
-		result.SummaryText = "Денний підсумок готовий, але модель не повернула текст дайджесту."
-	}
-	responseJSON, err := json.Marshal(result)
+	responseText := FormatDailyDigest(digest)
+	responseJSON, err := json.Marshal(digest)
 	if err != nil {
 		return "", err
 	}
 
-	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, result.Structured); err != nil {
+	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, dailyDigestToParsedNote(digest)); err != nil {
 		return "", err
 	}
 
@@ -300,13 +297,13 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		SourceHash:    sourceHash,
 		PromptVersion: PromptVersion,
 		Model:         s.llm.Model(),
-		ResponseText:  result.SummaryText,
+		ResponseText:  responseText,
 		ResponseJSON:  string(responseJSON),
 	}); err != nil {
 		return "", err
 	}
 
-	return result.SummaryText, nil
+	return responseText, nil
 }
 
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {

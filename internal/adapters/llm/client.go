@@ -17,7 +17,7 @@ import (
 type ClientLLM interface {
 	ParseManagerNote(ctx context.Context, raw string) (models.ParsedNote, error)
 	GenerateTicket(ctx context.Context, input string) (models.TicketDraft, error)
-	ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error)
+	ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error)
 	SummarizeWeekly(ctx context.Context, input string) (string, error)
 	Model() string
 	SummarizePerson(ctx context.Context, input string) (string, error)
@@ -111,17 +111,13 @@ func (c *Client) GenerateTicket(ctx context.Context, input string) (models.Ticke
 	return draft, nil
 }
 
-func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyProcessingResult, error) {
+func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
 	prompt := dailyPrompt() + "\n\nSource notes/actions:\n" + input
 	content, err := c.chatJSON(ctx, prompt)
 	if err != nil {
-		return models.DailyProcessingResult{}, err
+		return models.DailyDigest{}, err
 	}
-	var result models.DailyProcessingResult
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return models.DailyProcessingResult{}, fmt.Errorf("parse daily json: %w; content=%s", err, content)
-	}
-	return result, nil
+	return ParseDailyDigestJSON(content)
 }
 
 func (c *Client) SummarizeWeekly(ctx context.Context, input string) (string, error) {
@@ -237,55 +233,40 @@ func dailyPrompt() string {
 Do not evaluate employees. Do not score people. Do not recommend HR decisions.
 Do not invent facts. Every claim must be based on the provided notes.
 Language rules:
-- Respond in Ukrainian.
-- Keep all user-facing text in Ukrainian.
+- Respond in Ukrainian for all user-facing field values.
+- Keep text concise, neutral, practical, and source-bound.
 - Do not translate or transliterate person names freely.
 - Use canonical display names from Known people when a match exists.
 
-Entity rules:
-- People are identity entities, not just strings.
-- Match names against Known people and aliases.
-- If a mentioned name likely refers to a known person, return that person's person_id and canonical display_name.
-- If unsure, return needs_confirmation=true.
-- Never create a new person only because the name appears in a different language or transliteration.
-
-Focus on:
-1. Today summary
-2. Open loops and follow-ups
-3. Ticket candidates
-4. People highlights, grouped neutrally as positive signals, concerns, risks, blockers, growth topics, commitments, decisions, or context
-5. Suggested 1:1 topics
-6. Questions or unclear items that need confirmation
-Keep it concise, practical, and source-bound. Include note numbers when useful.
-
-Return valid JSON only with this shape:
+Return valid JSON only with this exact shape. Use empty arrays for empty sections and null for missing owner/due_hint:
 {
-  "summary_text": "Ukrainian user-facing daily digest",
-  "structured": {
-    "summary": "short neutral summary",
-    "tags": ["short_tags"],
-    "actions": [
-      {"title": "action title", "linked_person_name": "optional", "output_type": "ticket|meeting|message|reminder|"}
-    ],
-    "people_notes": [
-      {
-        "person_name": "name",
-        "type": "positive_signal|concern|growth_topic|context|follow_up_needed|commitment|decision|risk|blocker|review_evidence",
-        "theme": "ownership|communication|delivery|collaboration|technical_quality|reliability|mentorship|process|",
-        "text": "neutral source-bound note",
-        "include_in_review": true
-      }
-    ],
-    "people_mentioned": ["name"],
-    "ticket_drafts": [
-      {"title": "", "context": "", "problem": "", "acceptance_criteria": [""]}
-    ],
-    "suggested_questions": ["clarifying questions if useful"]
-  }
+  "short_summary": "short neutral Ukrainian summary",
+  "open_loops": [
+    {"title": "action or follow-up", "owner": "person or null", "due_hint": "date/time hint or null", "source_note_ids": [1]}
+  ],
+  "ticket_candidates": [
+    {"title": "ticket title", "context": "source-backed context", "owner": "person or null", "source_note_ids": [1]}
+  ],
+  "people_highlights": [
+    {
+      "person_name": "name",
+      "type": "positive_signal|concern|follow_up_needed|growth_topic|context|commitment|risk",
+      "theme": "communication|ownership|delivery|collaboration|technical_quality|reliability|hiring|release|process|other",
+      "text": "neutral source-backed note",
+      "source_note_ids": [1]
+    }
+  ],
+  "decisions": [
+    {"text": "decision or agreement", "source_note_ids": [1]}
+  ],
+  "suggested_next_steps": [
+    {"text": "suggested next step", "source_note_ids": [1]}
+  ],
+  "unclear_items": [
+    {"text": "unclear item or question", "source_note_ids": [1]}
+  ]
+}`
 }
-`
-}
-
 func weeklyPrompt() string {
 	return `You are preparing a weekly manager digest from manager-provided notes and actions.
 Do not evaluate employees. Do not score people. Do not recommend HR decisions.
