@@ -105,7 +105,7 @@ func dailyDigestToParsedNote(d models.DailyDigest) models.ParsedNote {
 		if strings.TrimSpace(l.Title) == "" {
 			continue
 		}
-		a := models.ParsedAction{Title: strings.TrimSpace(l.Title), OutputType: "reminder"}
+		a := models.ParsedAction{Title: strings.TrimSpace(l.Title), OutputType: "reminder", SourceNoteIDs: l.SourceNoteIDs}
 		if l.Owner != nil {
 			a.LinkedPersonName = strings.TrimSpace(*l.Owner)
 			if a.LinkedPersonName != "" {
@@ -118,7 +118,7 @@ func dailyDigestToParsedNote(d models.DailyDigest) models.ParsedNote {
 		if strings.TrimSpace(t.Title) == "" {
 			continue
 		}
-		a := models.ParsedAction{Title: strings.TrimSpace(t.Title), OutputType: "ticket"}
+		a := models.ParsedAction{Title: strings.TrimSpace(t.Title), OutputType: "ticket", SourceNoteIDs: t.SourceNoteIDs}
 		if t.Owner != nil {
 			a.LinkedPersonName = strings.TrimSpace(*t.Owner)
 			if a.LinkedPersonName != "" {
@@ -133,7 +133,7 @@ func dailyDigestToParsedNote(d models.DailyDigest) models.ParsedNote {
 			continue
 		}
 		people[strings.TrimSpace(h.PersonName)] = true
-		p.PeopleNotes = append(p.PeopleNotes, models.ParsedPeopleNote{PersonName: strings.TrimSpace(h.PersonName), Type: h.Type, Theme: h.Theme, Text: strings.TrimSpace(h.Text), IncludeInReview: true})
+		p.PeopleNotes = append(p.PeopleNotes, models.ParsedPeopleNote{PersonName: strings.TrimSpace(h.PersonName), Type: h.Type, Theme: h.Theme, Text: strings.TrimSpace(h.Text), IncludeInReview: true, SourceNoteIDs: h.SourceNoteIDs})
 	}
 	for name := range people {
 		p.PeopleMentioned = append(p.PeopleMentioned, name)
