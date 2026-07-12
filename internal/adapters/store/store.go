@@ -248,6 +248,34 @@ func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, pa
 		}
 	}
 
+	for _, d := range parsed.Decisions {
+		decision, ok := models.NormalizeDecision(d)
+		if !ok {
+			continue
+		}
+		var linkedPersonID *int64
+		if decision.LinkedPersonName != "" {
+			key := NormalizePersonName(decision.LinkedPersonName)
+			pid, ok := personIDs[key]
+			var err error
+			if !ok {
+				pid, err = upsertPerson(ctx, tx, userID, decision.LinkedPersonName)
+				if err != nil {
+					return 0, err
+				}
+			}
+			linkedPersonID = &pid
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO decisions (user_id, note_id, text, normalized_text, linked_person_id, topic, status) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, noteID, decision.Text, models.NormalizeDecisionText(decision.Text), linkedPersonID, decision.Topic, models.DecisionStatusActive); err != nil {
+			return 0, err
+		}
+	}
+	normalizedMentions, _ := models.NormalizeEntityMentionsForNote(parsed.EntityMentions)
+	for _, m := range normalizedMentions {
+		if _, err := tx.Exec(ctx, `INSERT INTO entity_mentions (user_id, note_id, entity_type, raw_value, normalized_value, display_value, context) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (note_id, entity_type, normalized_value) DO UPDATE SET raw_value=EXCLUDED.raw_value, display_value=EXCLUDED.display_value, context=EXCLUDED.context`, userID, noteID, m.Type, m.RawValue, m.NormalizedValue, m.DisplayValue, m.Context); err != nil {
+			return 0, err
+		}
+	}
 	for _, action := range parsed.Actions {
 		title := strings.TrimSpace(action.Title)
 		if title == "" {
@@ -372,6 +400,12 @@ func (s *Store) SaveNoteEnrichmentResult(ctx context.Context, userID, noteID int
 	if _, err := tx.Exec(ctx, `DELETE FROM people_notes WHERE user_id=$1 AND note_id=$2`, userID, noteID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM decisions WHERE user_id=$1 AND note_id=$2`, userID, noteID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM entity_mentions WHERE user_id=$1 AND note_id=$2`, userID, noteID); err != nil {
+		return err
+	}
 	if err := saveStructuredRecordsForNoteTx(ctx, tx, userID, noteID, parsed); err != nil {
 		return err
 	}
@@ -415,6 +449,34 @@ func saveStructuredRecordsForNoteTx(ctx context.Context, tx pgx.Tx, userID, note
 		}
 		personIDs[NormalizePersonName(name)] = pid
 		if _, err := tx.Exec(ctx, `INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, pid, noteID, emptyTo(pn.Type, "context"), pn.Theme, pn.Text, pn.IncludeInReview); err != nil {
+			return err
+		}
+	}
+	for _, d := range parsed.Decisions {
+		decision, ok := models.NormalizeDecision(d)
+		if !ok {
+			continue
+		}
+		var linkedPersonID *int64
+		if decision.LinkedPersonName != "" {
+			key := NormalizePersonName(decision.LinkedPersonName)
+			pid, ok := personIDs[key]
+			var err error
+			if !ok {
+				pid, err = upsertPerson(ctx, tx, userID, decision.LinkedPersonName)
+				if err != nil {
+					return err
+				}
+			}
+			linkedPersonID = &pid
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO decisions (user_id, note_id, text, normalized_text, linked_person_id, topic, status) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, noteID, decision.Text, models.NormalizeDecisionText(decision.Text), linkedPersonID, decision.Topic, models.DecisionStatusActive); err != nil {
+			return err
+		}
+	}
+	normalizedMentions, _ := models.NormalizeEntityMentionsForNote(parsed.EntityMentions)
+	for _, m := range normalizedMentions {
+		if _, err := tx.Exec(ctx, `INSERT INTO entity_mentions (user_id, note_id, entity_type, raw_value, normalized_value, display_value, context) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (note_id, entity_type, normalized_value) DO UPDATE SET raw_value=EXCLUDED.raw_value, display_value=EXCLUDED.display_value, context=EXCLUDED.context`, userID, noteID, m.Type, m.RawValue, m.NormalizedValue, m.DisplayValue, m.Context); err != nil {
 			return err
 		}
 	}
@@ -822,4 +884,38 @@ func saveParsedNoteTx(ctx context.Context, tx pgx.Tx, userID int64, raw string, 
 		return 0, err
 	}
 	return noteID, nil
+}
+
+func (s *Store) ListDecisionsByNote(ctx context.Context, userID, noteID int64) ([]models.DecisionRecord, error) {
+	rows, err := s.pool.Query(ctx, `SELECT d.id, d.user_id, d.note_id, d.text, d.normalized_text, d.linked_person_id, p.name, COALESCE(d.topic,''), d.status, d.decided_at, d.created_at, d.updated_at FROM decisions d LEFT JOIN people p ON p.id=d.linked_person_id WHERE d.user_id=$1 AND d.note_id=$2 ORDER BY d.id`, userID, noteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.DecisionRecord
+	for rows.Next() {
+		var r models.DecisionRecord
+		if err := rows.Scan(&r.ID, &r.UserID, &r.NoteID, &r.Text, &r.NormalizedText, &r.LinkedPersonID, &r.LinkedPersonName, &r.Topic, &r.Status, &r.DecidedAt, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListEntityMentionsByNote(ctx context.Context, userID, noteID int64) ([]models.EntityMentionRecord, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, user_id, note_id, entity_type, raw_value, normalized_value, display_value, COALESCE(context,''), created_at FROM entity_mentions WHERE user_id=$1 AND note_id=$2 ORDER BY id`, userID, noteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.EntityMentionRecord
+	for rows.Next() {
+		var r models.EntityMentionRecord
+		if err := rows.Scan(&r.ID, &r.UserID, &r.NoteID, &r.Type, &r.RawValue, &r.NormalizedValue, &r.DisplayValue, &r.Context, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

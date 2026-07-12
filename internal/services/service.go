@@ -18,7 +18,7 @@ import (
 )
 
 const PromptVersion = "v1"
-const NoteEnrichmentPromptVersion = "v1"
+const NoteEnrichmentPromptVersion = "v2"
 const DefaultNoteEnrichmentStaleTimeout = 3 * time.Minute
 
 type Service struct {
@@ -188,13 +188,23 @@ func (s *Service) EnrichClaimedNote(ctx context.Context, claim store.NoteForEnri
 		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return NoteEnrichmentResult{}, fmt.Errorf("now.llm_request: %w", err)
 	}
-	s.logger.Info("LLM processing completed", "operation", "note.enrichment_llm_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
+	parsed = models.AddTicketFallbackMentions(parsed, claim.RawText)
+	normalizedEntities, skippedEntities := models.NormalizeEntityMentionsForNote(parsed.EntityMentions)
+	normalizedDecisions, skippedDecisions := models.NormalizeDecisionsForNote(parsed.Decisions)
+	parsed.Decisions = normalizedDecisions
+	parsed.EntityMentions = make([]models.EntityMention, 0, len(normalizedEntities))
+	entityTypes := map[string]int{}
+	for _, rec := range normalizedEntities {
+		entityTypes[rec.Type]++
+		parsed.EntityMentions = append(parsed.EntityMentions, models.EntityMention{Type: rec.Type, Value: rec.NormalizedValue, RawValue: rec.RawValue, DisplayValue: rec.DisplayValue, Context: rec.Context})
+	}
+	s.logger.Info("LLM processing completed", "operation", "note.enrichment_llm_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed), "parsed_decisions", len(parsed.Decisions), "parsed_entities", len(parsed.EntityMentions), "normalized_entities", len(normalizedEntities), "skipped_decisions", skippedDecisions, "skipped_entities", skippedEntities, "entity_types", entityTypes)
 	if err := s.store.SaveNoteEnrichmentResult(ctx, userID, noteID, claim.ProcessingStartedAt, parsed, model, NoteEnrichmentPromptVersion); err != nil {
 		_ = s.store.MarkNoteEnrichmentFailed(ctx, userID, noteID, claim.ProcessingStartedAt, err)
 		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "error", err)
 		return NoteEnrichmentResult{}, fmt.Errorf("now.persistence: %w", err)
 	}
-	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
+	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "persisted_decisions", len(parsed.Decisions), "persisted_entities", len(parsed.EntityMentions))
 	return NoteEnrichmentResult{NoteID: noteID, Parsed: parsed, Attempt: claim.ProcessingAttempts, Model: model, PromptVersion: NoteEnrichmentPromptVersion}, nil
 }
 
@@ -414,6 +424,27 @@ func formatParsedNote(noteID int64, p models.ParsedNote, language models.Respons
 		b.WriteString(labels.PeopleNotes + ":\n")
 		for _, pn := range p.PeopleNotes {
 			b.WriteString(fmt.Sprintf("- %s: %s / %s — %s\n", pn.PersonName, pn.Type, pn.Theme, pn.Text))
+		}
+		b.WriteString("\n")
+	}
+	if len(p.Decisions) > 0 {
+		b.WriteString(labels.Decisions + ":\n")
+		for _, d := range p.Decisions {
+			b.WriteString("- " + d.Text + "\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(p.EntityMentions) > 0 {
+		b.WriteString(labels.Entities + ":\n")
+		for _, e := range p.EntityMentions {
+			value := strings.TrimSpace(e.DisplayValue)
+			if value == "" {
+				value = strings.TrimSpace(e.Value)
+			}
+			if value == "" {
+				continue
+			}
+			b.WriteString(fmt.Sprintf("- %s: %s\n", e.Type, value))
 		}
 		b.WriteString("\n")
 	}

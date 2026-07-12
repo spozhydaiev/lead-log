@@ -65,17 +65,19 @@ type NowLabels struct {
 	Summary     string
 	Actions     string
 	PeopleNotes string
+	Decisions   string
+	Entities    string
 	Questions   string
 }
 
 func (l ResponseLanguage) NowLabels() NowLabels {
 	switch l {
 	case LanguageUkrainian:
-		return NowLabels{"Збережено нотатку", "Підсумок", "Дії", "Нотатки про людей", "Питання"}
+		return NowLabels{"Збережено нотатку", "Підсумок", "Дії", "Нотатки про людей", "Рішення", "Сутності", "Питання"}
 	case LanguagePolish:
-		return NowLabels{"Zapisano notatkę", "Podsumowanie", "Działania", "Notatki o osobach", "Pytania"}
+		return NowLabels{"Zapisano notatkę", "Podsumowanie", "Działania", "Notatki o osobach", "Decyzje", "Encje", "Pytania"}
 	default:
-		return NowLabels{"Saved note", "Summary", "Actions", "People notes", "Questions"}
+		return NowLabels{"Saved note", "Summary", "Actions", "People notes", "Decisions", "Entities", "Questions"}
 	}
 }
 

@@ -10,6 +10,8 @@ type ParsedNote struct {
 	PeopleMentioned    []string           `json:"people_mentioned"`
 	TicketDrafts       []TicketDraft      `json:"ticket_drafts"`
 	SuggestedQuestions []string           `json:"suggested_questions"`
+	Decisions          []ParsedDecision   `json:"decisions,omitempty"`
+	EntityMentions     []EntityMention    `json:"entity_mentions,omitempty"`
 }
 
 type ParsedAction struct {
@@ -27,6 +29,31 @@ type ParsedPeopleNote struct {
 	IncludeInReview bool    `json:"include_in_review"`
 	SourceNoteIDs   []int64 `json:"source_note_ids,omitempty"`
 }
+
+type ParsedDecision struct {
+	Text             string `json:"text"`
+	LinkedPersonName string `json:"linked_person_name,omitempty"`
+	Topic            string `json:"topic,omitempty"`
+}
+
+type EntityMention struct {
+	Type         string `json:"type"`
+	Value        string `json:"value"`
+	RawValue     string `json:"raw_value,omitempty"`
+	DisplayValue string `json:"display_value,omitempty"`
+	Context      string `json:"context,omitempty"`
+}
+
+const (
+	EntityTypeTicket     = "ticket"
+	EntityTypeProject    = "project"
+	EntityTypeService    = "service"
+	EntityTypeComponent  = "component"
+	EntityTypeRepository = "repository"
+	EntityTypeDocument   = "document"
+	EntityTypeOther      = "other"
+	DecisionStatusActive = "active"
+)
 
 type TicketDraft struct {
 	Title              string   `json:"title"`
@@ -59,4 +86,31 @@ type PersonContextNote struct {
 	NoteID        int64
 	SourceNoteIDs []int64
 	CreatedAt     time.Time
+}
+
+type DecisionRecord struct {
+	ID               int64
+	UserID           int64
+	NoteID           int64
+	Text             string
+	NormalizedText   string
+	LinkedPersonID   *int64
+	LinkedPersonName *string
+	Topic            string
+	Status           string
+	DecidedAt        time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type EntityMentionRecord struct {
+	ID              int64
+	UserID          int64
+	NoteID          int64
+	Type            string
+	RawValue        string
+	NormalizedValue string
+	DisplayValue    string
+	Context         string
+	CreatedAt       time.Time
 }
