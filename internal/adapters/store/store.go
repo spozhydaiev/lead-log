@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,11 +15,22 @@ import (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	logger *slog.Logger
 }
 
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func New(pool *pgxpool.Pool, logger ...*slog.Logger) *Store {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+	return &Store{pool: pool, logger: l}
+}
+
+func (s *Store) logDBError(operation string, err error) {
+	if err != nil {
+		s.logger.Error("database error", "operation", operation, "error", err)
+	}
 }
 
 func (s *Store) UpsertUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -30,6 +42,9 @@ func (s *Store) UpsertUser(ctx context.Context, telegramUserID int64, username s
 		DO UPDATE SET username = EXCLUDED.username
 		RETURNING id
 	`, telegramUserID, username).Scan(&id)
+	if err != nil {
+		s.logDBError("store.upsert_user", err)
+	}
 	return id, err
 }
 
@@ -40,6 +55,9 @@ func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int6
 		VALUES ($1, $2)
 		RETURNING id
 	`, userID, raw).Scan(&noteID)
+	if err != nil {
+		s.logDBError("store.save_raw_note", err)
+	}
 	return noteID, err
 }
 
@@ -344,6 +362,9 @@ func (s *Store) SaveAgentResponse(ctx context.Context, r models.AgentResponse) e
 		r.ResponseJSON,
 	)
 
+	if err != nil {
+		s.logDBError("store.save_agent_response", err)
+	}
 	return err
 }
 
@@ -356,6 +377,9 @@ func (s *Store) HasDailySummarySend(ctx context.Context, userID int64, scopeKey 
 			WHERE user_id = $1 AND scope_key = $2
 		)
 	`, userID, scopeKey).Scan(&exists)
+	if err != nil {
+		s.logDBError("store.has_daily_summary_send", err)
+	}
 	return exists, err
 }
 
@@ -365,5 +389,8 @@ func (s *Store) RecordDailySummarySend(ctx context.Context, userID int64, scopeK
 		VALUES ($1, $2)
 		ON CONFLICT (user_id, scope_key) DO NOTHING
 	`, userID, scopeKey)
+	if err != nil {
+		s.logDBError("store.record_daily_summary_send", err)
+	}
 	return err
 }

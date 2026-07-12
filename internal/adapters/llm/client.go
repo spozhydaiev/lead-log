@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -26,14 +27,20 @@ type Client struct {
 	apiKey     string
 	model      string
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
-func NewClient(baseURL, apiKey, model string) *Client {
+func NewClient(baseURL, apiKey, model string, logger ...*slog.Logger) *Client {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
 		model:      model,
 		httpClient: &http.Client{Timeout: 45 * time.Second},
+		logger:     l,
 	}
 }
 
@@ -65,41 +72,44 @@ func (c *Client) Model() string {
 
 func (c *Client) ParseManagerNote(ctx context.Context, raw string) (models.ParsedNote, error) {
 	prompt := systemPrompt() + "\n\nManager note:\n" + raw
-	content, err := c.chatJSON(ctx, prompt)
+	content, err := c.chatJSON(ctx, "parse_note", prompt)
 	if err != nil {
 		return models.ParsedNote{}, err
 	}
 
 	var parsed models.ParsedNote
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return models.ParsedNote{}, fmt.Errorf("parse llm json: %w; content=%s", err, content)
+		c.logger.Warn("JSON parse failure", "operation", "parse_note", "response_size", len(content), "error", err)
+		return models.ParsedNote{}, fmt.Errorf("parse llm json: %w", err)
 	}
 	return parsed, nil
 }
 
 func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
 	prompt := dailyPrompt() + "\n\nSource notes/actions:\n" + input
-	content, err := c.chatJSON(ctx, prompt)
+	content, err := c.chatJSON(ctx, "daily", prompt)
 	if err != nil {
 		return models.DailyDigest{}, err
 	}
-	return ParseDailyDigestJSON(content)
+	return ParseDailyDigestJSONWithLogger(content, c.logger)
 }
 
 func (c *Client) SummarizeWeekly(ctx context.Context, input string) (string, error) {
 	prompt := weeklyPrompt() + "\n\nSource notes/actions:\n" + input
-	return c.chatText(ctx, prompt)
+	return c.chatText(ctx, "weekly", prompt)
 }
 
-func (c *Client) chatJSON(ctx context.Context, prompt string) (string, error) {
-	return c.chat(ctx, prompt, responseFormat{Type: "json_object"})
+func (c *Client) chatJSON(ctx context.Context, operation, prompt string) (string, error) {
+	return c.chat(ctx, operation, prompt, responseFormat{Type: "json_object"})
 }
 
-func (c *Client) chatText(ctx context.Context, prompt string) (string, error) {
-	return c.chat(ctx, prompt, responseFormat{Type: "text"})
+func (c *Client) chatText(ctx context.Context, operation, prompt string) (string, error) {
+	return c.chat(ctx, operation, prompt, responseFormat{Type: "text"})
 }
 
-func (c *Client) chat(ctx context.Context, prompt string, format responseFormat) (string, error) {
+func (c *Client) chat(ctx context.Context, operation, prompt string, format responseFormat) (string, error) {
+	started := time.Now()
+	c.logger.Info("LLM request started", "operation", operation, "model", c.model, "prompt_length", len(prompt))
 	reqBody := chatCompletionRequest{
 		Model:          c.model,
 		Temperature:    0.1,
@@ -121,23 +131,30 @@ func (c *Client) chat(ctx context.Context, prompt string, format responseFormat)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.logger.Error("LLM request failed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("llm error status=%d body=%s", resp.StatusCode, string(respBody))
+		c.logger.Error("LLM request failed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody))
+		return "", fmt.Errorf("llm error status=%d", resp.StatusCode)
 	}
 
 	var out chatCompletionResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
+		c.logger.Warn("JSON parse failure", "operation", operation, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "error", err)
 		return "", err
 	}
 	if len(out.Choices) == 0 {
-		return "", errors.New("llm returned no choices")
+		err := errors.New("llm returned no choices")
+		c.logger.Error("LLM request failed", "operation", operation, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "error", err)
+		return "", err
 	}
-	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+	content := strings.TrimSpace(out.Choices[0].Message.Content)
+	c.logger.Info("LLM request completed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "content_length", len(content))
+	return content, nil
 }
 
 func systemPrompt() string {

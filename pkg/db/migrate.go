@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,7 +12,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Migrate(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, logger ...*slog.Logger) error {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+	l.Info("migration runner started", "operation", "db.migrate")
+	appliedCount := 0
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -71,17 +78,25 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS) error 
 
 		if _, err := tx.Exec(ctx, string(content)); err != nil {
 			tx.Rollback(ctx)
+			l.Error("migration failure", "operation", "db.migrate", "migration", file, "error", err)
 			return fmt.Errorf("apply migration %s: %w", file, err)
 		}
 
 		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, file); err != nil {
 			tx.Rollback(ctx)
+			l.Error("migration failure", "operation", "db.migrate", "migration", file, "error", err)
 			return fmt.Errorf("record migration %s: %w", file, err)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			l.Error("migration failure", "operation", "db.migrate", "migration", file, "error", err)
 			return fmt.Errorf("commit migration %s: %w", file, err)
 		}
+		appliedCount++
+		l.Info("migration applied", "operation", "db.migrate", "migration", file)
+	}
+	if appliedCount == 0 {
+		l.Info("no pending migrations", "operation", "db.migrate")
 	}
 
 	return nil

@@ -42,6 +42,32 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `18:00`.
 - `DAILY_SUMMARY_TIMEZONE` — IANA timezone used for scheduled daily summaries and `/daily` date boundaries. Defaults to `Europe/Warsaw`.
+- `LOG_LEVEL` — structured log verbosity: `debug`, `info`, `warn`, or `error`. Defaults to `info`.
+- `LOG_FORMAT` — structured log output format: `text` or `json`. Defaults to `text`.
+
+
+## Logging
+
+LeadLog uses Go's standard `log/slog` package for structured development logs. Configure logs with `LOG_LEVEL` and `LOG_FORMAT`; use `LOG_FORMAT=json` when shipping logs to a collector.
+
+Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
+
+Privacy rules for logs:
+- Telegram user IDs may be logged for development diagnostics.
+- Raw notes, full LLM prompts, full LLM responses, API keys, Telegram tokens, database passwords, and full `DATABASE_URL` values are not logged.
+- At debug level, logs still prefer metadata such as lengths, counts, note IDs, and source hash prefixes over sensitive content.
+
+Example text log:
+
+```text
+time=2026-07-12T14:00:00.000Z level=INFO msg="application starting" llm_model=gpt-4.1-mini llm_base_host=api.openai.com daily_summary_enabled=false daily_summary_time=18:00 daily_summary_timezone=Europe/Warsaw log_level=info log_format=text
+```
+
+Example JSON log:
+
+```json
+{"time":"2026-07-12T14:00:00Z","level":"INFO","msg":"cache miss","component":"service","operation":"daily","user_id":42,"source_hash_prefix":"abc12345","cache_hit":false}
+```
 
 ## Run locally
 
@@ -91,7 +117,7 @@ On startup, the app:
 - applies pending `.sql` files in filename order;
 - records applied filenames in `schema_migrations`.
 
-There is no separate migration command at the moment; migrations run automatically before the Telegram bot starts polling.
+There is no separate migration command at the moment; migrations run automatically before the Telegram bot starts polling. Migration startup, applied filenames, no-op runs, and failures are logged with structured fields.
 
 ## Scheduled daily summaries
 
