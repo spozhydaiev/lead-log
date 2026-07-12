@@ -8,6 +8,11 @@ import (
 )
 
 func FormatDailyDigest(d models.DailyDigest) string {
+	return FormatDailyDigestForLanguage(d, models.LanguageEnglish)
+}
+
+func FormatDailyDigestForLanguage(d models.DailyDigest, language models.ResponseLanguage) string {
+	labels := language.DailyLabels()
 	var b strings.Builder
 	writeSection := func(title string) { b.WriteString(title + "\n") }
 	writeRefs := func(ids []int64) string {
@@ -23,15 +28,15 @@ func FormatDailyDigest(d models.DailyDigest) string {
 		if len(parts) == 0 {
 			return ""
 		}
-		return " (джерела: " + strings.Join(parts, ", ") + ")"
+		return " (" + labels.SourcesPrefix + ": " + strings.Join(parts, ", ") + ")"
 	}
 
 	if strings.TrimSpace(d.ShortSummary) != "" {
-		writeSection("Коротко")
+		writeSection(labels.ShortSummary)
 		b.WriteString(strings.TrimSpace(d.ShortSummary) + "\n\n")
 	}
 	if len(d.OpenLoops) > 0 {
-		writeSection("Open loops")
+		writeSection(labels.OpenLoops)
 		for _, item := range d.OpenLoops {
 			title := strings.TrimSpace(item.Title)
 			if title == "" {
@@ -49,7 +54,7 @@ func FormatDailyDigest(d models.DailyDigest) string {
 		b.WriteString("\n")
 	}
 	if len(d.TicketCandidates) > 0 {
-		writeSection("Ticket candidates")
+		writeSection(labels.TicketCandidates)
 		for _, item := range d.TicketCandidates {
 			title := strings.TrimSpace(item.Title)
 			if title == "" {
@@ -67,7 +72,7 @@ func FormatDailyDigest(d models.DailyDigest) string {
 		b.WriteString("\n")
 	}
 	if len(d.PeopleHighlights) > 0 {
-		writeSection("People highlights")
+		writeSection(labels.PeopleHighlights)
 		for _, item := range d.PeopleHighlights {
 			if strings.TrimSpace(item.PersonName) == "" || strings.TrimSpace(item.Text) == "" {
 				continue
@@ -76,9 +81,9 @@ func FormatDailyDigest(d models.DailyDigest) string {
 		}
 		b.WriteString("\n")
 	}
-	writeTextItems(&b, "Decisions / agreements", d.Decisions, writeRefs)
-	writeTextItems(&b, "Suggested next steps", d.SuggestedNextSteps, writeRefs)
-	writeTextItems(&b, "Unclear items", d.UnclearItems, writeRefs)
+	writeTextItems(&b, labels.Decisions, d.Decisions, writeRefs)
+	writeTextItems(&b, labels.SuggestedNextSteps, d.SuggestedNextSteps, writeRefs)
+	writeTextItems(&b, labels.UnclearItems, d.UnclearItems, writeRefs)
 	return strings.TrimSpace(b.String())
 }
 

@@ -97,7 +97,7 @@ func (d *DailySummary) sendForAll(ctx context.Context, now time.Time) {
 			d.logger.Error("user processing failed", "operation", "scheduler.generate", "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
 			continue
 		}
-		if response == "За сьогодні нотаток немає." {
+		if response == d.service.ResponseMessages().NoNotesToday {
 			d.logger.Info("summary skipped because no notes", "operation", "scheduler.skip", "telegram_user_id", telegramUserID, "user_id", userID, "scope_key", scopeKey)
 			continue
 		}

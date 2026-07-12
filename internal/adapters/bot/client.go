@@ -58,21 +58,21 @@ func (b *Bot) Run(ctx context.Context) error {
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	telegramUserID := msg.From.ID
 	if len(b.cfg.AllowedTelegramUserIDs) > 0 && !b.cfg.AllowedTelegramUserIDs[telegramUserID] {
-		b.reply(msg.Chat.ID, "Access denied.")
+		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().AccessDenied)
 		return
 	}
 
 	userID, err := b.svc.EnsureUser(ctx, telegramUserID, msg.From.UserName)
 	if err != nil {
 		b.logger.Error("command failed", "operation", "bot.ensure_user", "telegram_user_id", telegramUserID, "error", err)
-		b.reply(msg.Chat.ID, "Failed to initialize user.")
+		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UserInitFailed)
 		return
 	}
 
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", "unsupported")
-		b.reply(msg.Chat.ID, "Send text note or use /note <text>.")
+		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UnsupportedText)
 		return
 	}
 
@@ -89,7 +89,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	var response string
 	switch cmd {
 	case "/start", "/help":
-		response = helpText()
+		response = b.cfg.ResponseLanguage.CommonMessages().HelpText
 	case "/note":
 		response, err = b.svc.CaptureNote(ctx, userID, arg)
 	case "/now":
@@ -143,7 +143,7 @@ func (b *Bot) reply(chatID int64, text string) {
 
 func (b *Bot) send(chatID int64, text string) error {
 	if strings.TrimSpace(text) == "" {
-		text = "Done."
+		text = b.cfg.ResponseLanguage.CommonMessages().EmptySendFallback
 	}
 	for _, chunk := range chunks(text, 3500) {
 		msg := tgbotapi.NewMessage(chatID, chunk)
@@ -167,20 +167,4 @@ func chunks(s string, max int) []string {
 	}
 	out = append(out, s)
 	return out
-}
-
-func helpText() string {
-	return `LeadLog Bot
-
-Команди:
-/note <текст> — швидко зберегти сиру нотатку без AI-обробки
-/now <текст> — зберегти й одразу структурувати нотатку
-/open — показати відкриті дії, створені лише через явну /now-обробку
-/done <action_id> — позначити дію виконаною
-/daily — денний дайджест за сьогодні без створення дій чи нотаток про людей
-/daily --refresh — згенерувати денний дайджест заново
-/weekly — тижневий дайджест за останні 7 днів
-/weekly --refresh — згенерувати тижневий дайджест заново
-
-Порада: можна надіслати звичайний текст без /note. Він збережеться як сира нотатка для /daily.`
 }

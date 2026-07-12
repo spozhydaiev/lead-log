@@ -28,9 +28,10 @@ type Client struct {
 	model      string
 	httpClient *http.Client
 	logger     *slog.Logger
+	language   models.ResponseLanguage
 }
 
-func NewClient(baseURL, apiKey, model string, logger ...*slog.Logger) *Client {
+func NewClient(baseURL, apiKey, model string, language models.ResponseLanguage, logger ...*slog.Logger) *Client {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
 		l = logger[0]
@@ -41,6 +42,7 @@ func NewClient(baseURL, apiKey, model string, logger ...*slog.Logger) *Client {
 		model:      model,
 		httpClient: &http.Client{Timeout: 45 * time.Second},
 		logger:     l,
+		language:   language,
 	}
 }
 
@@ -71,7 +73,7 @@ func (c *Client) Model() string {
 }
 
 func (c *Client) ParseManagerNote(ctx context.Context, raw string) (models.ParsedNote, error) {
-	prompt := systemPrompt() + "\n\nManager note:\n" + raw
+	prompt := systemPrompt(c.language) + "\n\nManager note:\n" + raw
 	content, err := c.chatJSON(ctx, "parse_note", prompt)
 	if err != nil {
 		return models.ParsedNote{}, err
@@ -86,7 +88,7 @@ func (c *Client) ParseManagerNote(ctx context.Context, raw string) (models.Parse
 }
 
 func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
-	prompt := dailyPrompt() + "\n\nSource notes/actions:\n" + input
+	prompt := dailyPrompt(c.language) + "\n\nSource notes/actions:\n" + input
 	content, err := c.chatJSON(ctx, "daily", prompt)
 	if err != nil {
 		return models.DailyDigest{}, err
@@ -95,7 +97,7 @@ func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDi
 }
 
 func (c *Client) SummarizeWeekly(ctx context.Context, input string) (string, error) {
-	prompt := weeklyPrompt() + "\n\nSource notes/actions:\n" + input
+	prompt := weeklyPrompt(c.language) + "\n\nSource notes/actions:\n" + input
 	return c.chatText(ctx, "weekly", prompt)
 }
 
@@ -157,7 +159,7 @@ func (c *Client) chat(ctx context.Context, operation, prompt string, format resp
 	return content, nil
 }
 
-func systemPrompt() string {
+func systemPrompt(language models.ResponseLanguage) string {
 	return `You are a private assistant for a team lead.
 Your job is to structure only manager-provided notes.
 Do not evaluate employees.
@@ -166,10 +168,7 @@ Do not recommend HR decisions like promote, fire, PIP, compensation, disciplinar
 Do not invent facts.
 If something is uncertain, keep it as a suggested follow-up or question.
 Use source-bound, careful wording.
-Always respond in Ukrainian.
-All user-facing summaries, actions and explanations must be in Ukrainian, regardless of the input language.
-Do not switch language unless the user explicitly asks.
-Respond in Ukrainian, but preserve person names as they are stored in the user's canonical people database.
+` + "\n" + language.PromptInstruction() + `
 Do not translate or transliterate person names unless mapping to an existing canonical person.
 
 Return valid JSON only with this shape:
@@ -192,14 +191,13 @@ Return valid JSON only with this shape:
 }`
 }
 
-func dailyPrompt() string {
+func dailyPrompt(language models.ResponseLanguage) string {
 	return `You are preparing a daily manager digest from manager-provided notes created today.
 Do not evaluate employees. Do not score people. Do not recommend HR decisions.
 Do not invent facts. Every claim must be based on the provided notes.
 Language rules:
-- Respond in Ukrainian for all user-facing field values.
+` + language.PromptInstruction() + `
 - Keep text concise, neutral, practical, and source-bound.
-- Do not translate or transliterate person names freely.
 - Use canonical display names from Known people when a match exists.
 
 People highlight classification rules:
@@ -213,7 +211,7 @@ People highlight classification rules:
 
 Return valid JSON only with this exact shape. Use empty arrays for empty sections and null for missing owner/due_hint:
 {
-  "short_summary": "short neutral Ukrainian summary",
+  "short_summary": "short neutral summary",
   "open_loops": [
     {"title": "action or follow-up", "owner": "person or null", "due_hint": "date/time hint or null", "source_note_ids": [1]}
   ],
@@ -240,15 +238,12 @@ Return valid JSON only with this exact shape. Use empty arrays for empty section
   ]
 }`
 }
-func weeklyPrompt() string {
+func weeklyPrompt(language models.ResponseLanguage) string {
 	return `You are preparing a weekly manager digest from manager-provided notes and actions.
 Do not evaluate employees. Do not score people. Do not recommend HR decisions.
 Summarize what happened, important topics, open loops, risks, decisions, suggested next steps, and what the manager worked on personally.
 Every claim must be phrased as based on the provided notes.
 Keep it concise and practical.
-Always respond in Ukrainian.
-All user-facing summaries, actions and explanations must be in Ukrainian, regardless of the input language.
-Do not switch language unless the user explicitly asks.
-Respond in Ukrainian, but preserve person names as they are stored in the user's canonical people database.
+` + language.PromptInstruction() + `
 Do not translate or transliterate person names unless mapping to an existing canonical person.`
 }

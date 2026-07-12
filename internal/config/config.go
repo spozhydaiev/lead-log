@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
 type Config struct {
@@ -22,6 +24,7 @@ type Config struct {
 	DailySummaryLocation   *time.Location
 	LogLevel               string
 	LogFormat              string
+	ResponseLanguage       models.ResponseLanguage
 }
 
 func Load() Config {
@@ -34,6 +37,11 @@ func Load() Config {
 	dailyTime := envOr("DAILY_SUMMARY_TIME", "18:00")
 	if _, err := time.Parse("15:04", dailyTime); err != nil {
 		panic("invalid env var DAILY_SUMMARY_TIME: " + err.Error())
+	}
+
+	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
+	if err != nil {
+		panic(err.Error())
 	}
 
 	return Config{
@@ -49,6 +57,7 @@ func Load() Config {
 		DailySummaryLocation:   dailyLocation,
 		LogLevel:               envOr("LOG_LEVEL", "info"),
 		LogFormat:              envOr("LOG_FORMAT", "text"),
+		ResponseLanguage:       responseLanguage,
 	}
 }
 

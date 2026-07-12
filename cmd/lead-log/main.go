@@ -31,6 +31,8 @@ func main() {
 		"daily_summary_timezone", cfg.DailySummaryTimezone,
 		"log_level", cfg.LogLevel,
 		"log_format", cfg.LogFormat,
+		"response_language", string(cfg.ResponseLanguage),
+		"response_language_name", cfg.ResponseLanguage.DisplayName(),
 	)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
@@ -47,9 +49,9 @@ func main() {
 	}
 
 	st := store.New(pool, logger.With("component", "store"))
-	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, logger.With("component", "llm"))
+	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ResponseLanguage, logger.With("component", "llm"))
 
-	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithLogger(logger.With("component", "service")))
+	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
 
 	telegramBot, err := bot.New(cfg, service, logger.With("component", "bot"))
 	if err != nil {
