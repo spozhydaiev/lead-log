@@ -187,8 +187,24 @@ Return valid JSON only with this shape:
       "include_in_review": true
     }
   ],
+  "decisions": [
+    {"text": "explicitly accepted decision or agreement", "linked_person_name": "optional", "topic": "optional topic"}
+  ],
+  "entity_mentions": [
+    {"type": "ticket|project|service|component|repository|document|other", "value": "exact entity name/key from note", "context": "short optional source context"}
+  ],
   "suggested_questions": ["clarifying questions if useful"]
-}`
+}
+
+Decision extraction rules:
+- Extract only explicitly accepted decisions or agreements, not guesses, questions, options, unconfirmed plans, ordinary actions, or suggestions.
+- Do not invent decisions from action items.
+
+Entity extraction rules:
+- Extract only work entities explicitly present in the note.
+- For ticket, return the exact ticket key and normalize letter case to uppercase; never invent IDs.
+- For project/service/component/repository/document, use the name from the text; avoid generic nouns like backend, meeting, or task unless they are concrete names.
+- Use other only for important retrieval-worthy named work entities; do not convert every noun into an entity.`
 }
 
 func dailyPrompt(language models.ResponseLanguage) string {

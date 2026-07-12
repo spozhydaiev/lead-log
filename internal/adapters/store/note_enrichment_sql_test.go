@@ -42,6 +42,10 @@ func TestEnrichmentPersistenceUsesNoteScopedReplaceStrategy(t *testing.T) {
 		"func (s *store) claimnoteforenrichment",
 		"delete from actions where user_id=$1 and note_id=$2",
 		"delete from people_notes where user_id=$1 and note_id=$2",
+		"delete from decisions where user_id=$1 and note_id=$2",
+		"delete from entity_mentions where user_id=$1 and note_id=$2",
+		"insert into decisions",
+		"insert into entity_mentions",
 		"processing_status='processing' and processing_started_at=$3",
 	} {
 		if !strings.Contains(source, required) {
@@ -79,5 +83,28 @@ func TestBackgroundEnrichmentQueueUsesPostgresClaimSemantics(t *testing.T) {
 	migrationSQL := strings.ToLower(string(migration))
 	if !strings.Contains(migrationSQL, "add column if not exists next_processing_at") || !strings.Contains(migrationSQL, "idx_notes_enrichment_queue") {
 		t.Fatalf("next_processing_at migration missing queue column/index")
+	}
+}
+
+func TestDecisionsAndEntityMentionsMigration(t *testing.T) {
+	content, err := os.ReadFile("../../../migrations/011_add_decisions_entity_mentions.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := strings.ToLower(string(content))
+	for _, required := range []string{
+		"create table if not exists decisions",
+		"note_id bigint not null references notes(id) on delete cascade",
+		"idx_decisions_user_decided_at",
+		"idx_decisions_note_id",
+		"create table if not exists entity_mentions",
+		"entity_type in ('ticket', 'project', 'service', 'component', 'repository', 'document', 'other')",
+		"unique(note_id, entity_type, normalized_value)",
+		"idx_entity_mentions_user_type_value",
+		"idx_entity_mentions_note_id",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("decisions/entity migration missing %q", required)
+		}
 	}
 }
