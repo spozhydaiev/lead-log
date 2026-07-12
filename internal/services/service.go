@@ -98,16 +98,16 @@ func (s *Service) CaptureNoteForTelegramUpdate(ctx context.Context, userID int64
 }
 
 func (s *Service) AddNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
-	noteID, err := s.store.SaveRawNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
+	claim, err := s.store.CreateAndClaimNoteForEnrichmentAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
 	if err != nil {
 		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("note created", "operation", "note.created", "user_id", userID, "note_id", noteID, "status", store.NoteProcessingStatusPending, "note_length", len(raw))
-	result, err := s.EnrichNote(ctx, userID, noteID)
+	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "user_id", userID, "note_id", claim.ID, "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
+	result, err := s.EnrichClaimedNote(ctx, claim)
 	if err != nil {
 		return "", err
 	}
-	return formatParsedNote(noteID, result.Parsed, s.language), nil
+	return formatParsedNote(result.NoteID, result.Parsed, s.language), nil
 }
 
 func (s *Service) DoneForTelegramUpdate(ctx context.Context, userID int64, arg string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
@@ -131,16 +131,16 @@ func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (st
 }
 
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
-	noteID, err := s.store.SaveRawNote(ctx, userID, raw)
+	claim, err := s.store.CreateAndClaimNoteForEnrichment(ctx, userID, raw)
 	if err != nil {
 		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("note created", "operation", "note.created", "user_id", userID, "note_id", noteID, "status", store.NoteProcessingStatusPending, "note_length", len(raw))
-	result, err := s.EnrichNote(ctx, userID, noteID)
+	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "user_id", userID, "note_id", claim.ID, "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
+	result, err := s.EnrichClaimedNote(ctx, claim)
 	if err != nil {
 		return "", err
 	}
-	return formatParsedNote(noteID, result.Parsed, s.language), nil
+	return formatParsedNote(result.NoteID, result.Parsed, s.language), nil
 }
 
 type NoteEnrichmentResult struct {
@@ -168,11 +168,8 @@ func (s *Service) ReprocessNote(ctx context.Context, userID, noteID int64) (Note
 	return result, err
 }
 
-func (s *Service) enrichNote(ctx context.Context, userID, noteID int64, allowProcessed bool) (NoteEnrichmentResult, error) {
-	claim, err := s.store.ClaimNoteForEnrichment(ctx, userID, noteID, s.noteEnrichmentStaleTimeout, allowProcessed)
-	if err != nil {
-		return NoteEnrichmentResult{}, fmt.Errorf("note.claim_enrichment: %w", err)
-	}
+func (s *Service) EnrichClaimedNote(ctx context.Context, claim store.NoteForEnrichment) (NoteEnrichmentResult, error) {
+	userID, noteID := claim.UserID, claim.ID
 	if claim.ProcessingStatus != store.NoteProcessingStatusProcessing {
 		s.logger.Info("enrichment not claimed", "operation", "note.enrichment_already_processing", "user_id", userID, "note_id", noteID, "status", claim.ProcessingStatus, "attempt", claim.ProcessingAttempts)
 		return NoteEnrichmentResult{}, fmt.Errorf("note enrichment not claimable: %s", claim.ProcessingStatus)
@@ -199,6 +196,14 @@ func (s *Service) enrichNote(ctx context.Context, userID, noteID int64, allowPro
 	}
 	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
 	return NoteEnrichmentResult{NoteID: noteID, Parsed: parsed, Attempt: claim.ProcessingAttempts, Model: model, PromptVersion: NoteEnrichmentPromptVersion}, nil
+}
+
+func (s *Service) enrichNote(ctx context.Context, userID, noteID int64, allowProcessed bool) (NoteEnrichmentResult, error) {
+	claim, err := s.store.ClaimNoteForEnrichment(ctx, userID, noteID, s.noteEnrichmentStaleTimeout, allowProcessed)
+	if err != nil {
+		return NoteEnrichmentResult{}, fmt.Errorf("note.claim_enrichment: %w", err)
+	}
+	return s.EnrichClaimedNote(ctx, claim)
 }
 
 func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error) {

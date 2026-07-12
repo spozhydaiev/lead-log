@@ -13,6 +13,7 @@ import (
 	"github.com/spozhydaiev/lead-log/internal/logging"
 	"github.com/spozhydaiev/lead-log/internal/scheduler"
 	svc "github.com/spozhydaiev/lead-log/internal/services"
+	"github.com/spozhydaiev/lead-log/internal/workers"
 	"github.com/spozhydaiev/lead-log/migrations"
 	"github.com/spozhydaiev/lead-log/pkg/db"
 )
@@ -35,6 +36,11 @@ func main() {
 		"response_language", string(cfg.ResponseLanguage),
 		"response_language_name", cfg.ResponseLanguage.DisplayName(),
 		"note_enrichment_processing_timeout", cfg.NoteEnrichmentProcessingTimeout.String(),
+		"note_enrichment_worker_enabled", cfg.NoteEnrichmentWorkerEnabled,
+		"note_enrichment_poll_interval", cfg.NoteEnrichmentPollInterval.String(),
+		"note_enrichment_batch_size", cfg.NoteEnrichmentBatchSize,
+		"note_enrichment_worker_concurrency", cfg.NoteEnrichmentWorkerConcurrency,
+		"note_enrichment_max_attempts", cfg.NoteEnrichmentMaxAttempts,
 	)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
@@ -59,6 +65,11 @@ func main() {
 	if err != nil {
 		logger.Error("telegram bot initialization failed", "component", "bot", "operation", "bot.init", "error", err)
 		os.Exit(1)
+	}
+
+	if cfg.NoteEnrichmentWorkerEnabled {
+		noteWorker := workers.NewNoteEnrichment(st, service, workers.NoteEnrichmentConfig{PollInterval: cfg.NoteEnrichmentPollInterval, BatchSize: cfg.NoteEnrichmentBatchSize, Concurrency: cfg.NoteEnrichmentWorkerConcurrency, MaxAttempts: cfg.NoteEnrichmentMaxAttempts, StaleTimeout: cfg.NoteEnrichmentProcessingTimeout}, logger.With("component", "note_enrichment_worker"))
+		go noteWorker.Run(ctx)
 	}
 
 	if cfg.DailySummaryEnabled {

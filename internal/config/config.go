@@ -28,6 +28,11 @@ type Config struct {
 	ResponseLanguage                models.ResponseLanguage
 	TelegramUpdateProcessingTimeout time.Duration
 	NoteEnrichmentProcessingTimeout time.Duration
+	NoteEnrichmentWorkerEnabled     bool
+	NoteEnrichmentPollInterval      time.Duration
+	NoteEnrichmentBatchSize         int
+	NoteEnrichmentWorkerConcurrency int
+	NoteEnrichmentMaxAttempts       int
 }
 
 func Load() Config {
@@ -56,6 +61,14 @@ func Load() Config {
 		panic("invalid env var NOTE_ENRICHMENT_PROCESSING_TIMEOUT: must be a duration greater than TELEGRAM_UPDATE_PROCESSING_TIMEOUT")
 	}
 
+	noteEnrichmentPollInterval, err := time.ParseDuration(envOr("NOTE_ENRICHMENT_POLL_INTERVAL", "5s"))
+	if err != nil || noteEnrichmentPollInterval <= 0 {
+		panic("invalid env var NOTE_ENRICHMENT_POLL_INTERVAL: must be a positive duration")
+	}
+	noteEnrichmentBatchSize := parsePositiveInt("NOTE_ENRICHMENT_BATCH_SIZE", 10)
+	noteEnrichmentWorkerConcurrency := parsePositiveInt("NOTE_ENRICHMENT_WORKER_CONCURRENCY", 1)
+	noteEnrichmentMaxAttempts := parsePositiveInt("NOTE_ENRICHMENT_MAX_ATTEMPTS", 3)
+
 	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
 	if err != nil {
 		panic(err.Error())
@@ -78,6 +91,11 @@ func Load() Config {
 		ResponseLanguage:                responseLanguage,
 		TelegramUpdateProcessingTimeout: telegramUpdateProcessingTimeout,
 		NoteEnrichmentProcessingTimeout: noteEnrichmentProcessingTimeout,
+		NoteEnrichmentWorkerEnabled:     envOr("NOTE_ENRICHMENT_WORKER_ENABLED", "true") != "false",
+		NoteEnrichmentPollInterval:      noteEnrichmentPollInterval,
+		NoteEnrichmentBatchSize:         noteEnrichmentBatchSize,
+		NoteEnrichmentWorkerConcurrency: noteEnrichmentWorkerConcurrency,
+		NoteEnrichmentMaxAttempts:       noteEnrichmentMaxAttempts,
 	}
 }
 
@@ -127,4 +145,13 @@ func parseAllowedUsers(raw string) map[int64]bool {
 func parseBool(raw string) bool {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func parsePositiveInt(key string, fallback int) int {
+	raw := envOr(key, strconv.Itoa(fallback))
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		panic("invalid env var " + key + ": must be a positive integer")
+	}
+	return v
 }
