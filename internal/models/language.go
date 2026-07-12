@@ -94,21 +94,24 @@ type CommonMessages struct {
 	AccessDenied       string
 	UserInitFailed     string
 	HelpText           string
+	NoteUsage          string
+	UnknownCommand     string
+	GenericError       string
 }
 
 func (l ResponseLanguage) CommonMessages() CommonMessages {
 	switch l {
 	case LanguageUkrainian:
 		return CommonMessages{
-			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp,
+			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp, NoteUsage: "Використання: /note <текст>", UnknownCommand: "Невідома команда. Використайте /help, щоб побачити доступні команди.", GenericError: "Щось пішло не так. Спробуйте пізніше.",
 		}
 	case LanguagePolish:
 		return CommonMessages{
-			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp,
+			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp, NoteUsage: "Użycie: /note <tekst>", UnknownCommand: "Nieznane polecenie. Użyj /help, aby zobaczyć dostępne polecenia.", GenericError: "Coś poszło nie tak. Spróbuj ponownie później.",
 		}
 	default:
 		return CommonMessages{
-			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp,
+			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp, NoteUsage: "Usage: /note <text>", UnknownCommand: "Unknown command. Use /help to see available commands.", GenericError: "Something went wrong. Please try again later.",
 		}
 	}
 }

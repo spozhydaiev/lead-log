@@ -1,9 +1,16 @@
 package bot
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/spozhydaiev/lead-log/internal/config"
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -52,4 +59,137 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 			t.Fatalf("help text still exposes %q\n%s", removed, help)
 		}
 	}
+}
+
+func TestHandleMessageRejectsUnauthorizedWithoutEnsuringUser(t *testing.T) {
+	fake := &fakeBotService{}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(200, "/note hidden"), func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.ensureCalls != 0 {
+		t.Fatalf("EnsureUser called %d times, want 0", fake.ensureCalls)
+	}
+	if len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().AccessDenied {
+		t.Fatalf("replies = %#v", replies)
+	}
+}
+
+func TestHandleMessageNoteRequiresText(t *testing.T) {
+	for _, text := range []string{"/note", "/note    "} {
+		t.Run(text, func(t *testing.T) {
+			fake := &fakeBotService{}
+			b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+			var replies []string
+			b.handleMessageWithReply(testContext(), testMessage(100, text), func(chatID int64, text string) { replies = append(replies, text) })
+			if fake.captureCalls != 0 {
+				t.Fatalf("CaptureNote called %d times, want 0", fake.captureCalls)
+			}
+			if len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().NoteUsage {
+				t.Fatalf("replies = %#v", replies)
+			}
+		})
+	}
+}
+
+func TestHandleMessageNoteWithTextStillCaptures(t *testing.T) {
+	fake := &fakeBotService{captureResponse: "saved"}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(100, "/note follow up"), func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.captureCalls != 1 || fake.lastRaw != "follow up" {
+		t.Fatalf("CaptureNote calls/raw = %d/%q, want 1/follow up", fake.captureCalls, fake.lastRaw)
+	}
+	if len(replies) != 1 || replies[0] != "saved" {
+		t.Fatalf("replies = %#v", replies)
+	}
+}
+
+func TestHandleMessageUnknownCommandsAreNotCaptured(t *testing.T) {
+	for _, text := range []string{"/daliy", "/unknown test", "/unknown@LeadLogBot test"} {
+		t.Run(text, func(t *testing.T) {
+			fake := &fakeBotService{}
+			b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+			var replies []string
+			b.handleMessageWithReply(testContext(), testMessage(100, text), func(chatID int64, text string) { replies = append(replies, text) })
+			if fake.captureCalls != 0 {
+				t.Fatalf("CaptureNote called %d times, want 0", fake.captureCalls)
+			}
+			if len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().UnknownCommand {
+				t.Fatalf("replies = %#v", replies)
+			}
+		})
+	}
+}
+
+func TestHandleMessagePlainTextStillCaptures(t *testing.T) {
+	fake := &fakeBotService{captureResponse: "saved"}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	b.handleMessageWithReply(testContext(), testMessage(100, "follow up without slash"), func(chatID int64, text string) {})
+	if fake.captureCalls != 1 || fake.lastRaw != "follow up without slash" {
+		t.Fatalf("CaptureNote calls/raw = %d/%q", fake.captureCalls, fake.lastRaw)
+	}
+}
+
+func TestHandleMessageServiceErrorUsesGenericReply(t *testing.T) {
+	fake := &fakeBotService{captureErr: errTestService}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(100, "plain text"), func(chatID int64, text string) { replies = append(replies, text) })
+	if len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().GenericError {
+		t.Fatalf("replies = %#v", replies)
+	}
+	if strings.Contains(replies[0], errTestService.Error()) || strings.Contains(replies[0], "SQL") {
+		t.Fatalf("reply leaks internal error: %q", replies[0])
+	}
+}
+
+var errTestService = errors.New("SQL timeout in internal function")
+
+func testContext() context.Context { return context.Background() }
+
+func testBot(svc service, allowed map[int64]bool, language models.ResponseLanguage) *Bot {
+	return &Bot{cfg: config.Config{AllowedTelegramUserIDs: allowed, ResponseLanguage: language}, svc: svc, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+func testMessage(userID int64, text string) *tgbotapi.Message {
+	return &tgbotapi.Message{MessageID: 1, From: &tgbotapi.User{ID: userID, UserName: "tester"}, Chat: &tgbotapi.Chat{ID: userID}, Text: text}
+}
+
+type fakeBotService struct {
+	ensureCalls     int
+	captureCalls    int
+	lastRaw         string
+	captureResponse string
+	captureErr      error
+}
+
+func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
+	f.ensureCalls++
+	return telegramUserID + 10, nil
+}
+func (f *fakeBotService) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
+	f.captureCalls++
+	f.lastRaw = raw
+	if f.captureErr != nil {
+		return "", f.captureErr
+	}
+	if f.captureResponse != "" {
+		return f.captureResponse, nil
+	}
+	return "saved", nil
+}
+func (f *fakeBotService) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
+	return "", nil
+}
+func (f *fakeBotService) OpenActions(ctx context.Context, userID int64) (string, error) {
+	return "", nil
+}
+func (f *fakeBotService) Done(ctx context.Context, userID int64, arg string) (string, error) {
+	return "", nil
+}
+func (f *fakeBotService) Daily(ctx context.Context, userID int64, refresh bool) (string, error) {
+	return "", nil
+}
+func (f *fakeBotService) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
+	return "", nil
 }

@@ -71,7 +71,7 @@ func TestSaturdayAndSundayDoNotSend(t *testing.T) {
 	}
 }
 
-func TestZeroNotesDoNotSendTelegramMessages(t *testing.T) {
+func TestZeroNotesDoNotSendTelegramMessagesOrRecordSend(t *testing.T) {
 	loc := mustWarsaw(t)
 	st := &fakeStore{}
 	svc := &fakeService{noteCount: 0, response: "No notes today."}
@@ -87,6 +87,40 @@ func TestZeroNotesDoNotSendTelegramMessages(t *testing.T) {
 	if st.recorded != 0 {
 		t.Fatalf("recorded %d sends, want 0", st.recorded)
 	}
+	if svc.dailyCalls != 1 {
+		t.Fatalf("generated %d summaries, want 1 scheduler service check with no LLM inside service", svc.dailyCalls)
+	}
+}
+
+func TestZeroNotesContinuesToOtherUsers(t *testing.T) {
+	loc := mustWarsaw(t)
+	st := &fakeStore{}
+	svc := &fakeService{noteCounts: map[int64]int{101: 0, 201: 1}, responses: map[int64]string{101: "No notes today.", 201: "summary"}}
+	sender := &fakeSender{}
+	d, err := NewDailySummary(st, svc, sender, map[int64]bool{100: true, 200: true}, "08:45", loc, SummaryModePreviousWorkday)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sendForAll(context.Background(), time.Date(2026, 7, 14, 8, 45, 0, 0, loc))
+	if svc.dailyCalls != 2 {
+		t.Fatalf("generated %d summaries, want 2", svc.dailyCalls)
+	}
+	if sender.sent != 1 {
+		t.Fatalf("sent %d messages, want 1", sender.sent)
+	}
+	if st.recorded != 1 {
+		t.Fatalf("recorded %d sends, want 1", st.recorded)
+	}
+}
+
+func TestPreviousWorkdayUsesConfiguredTimezone(t *testing.T) {
+	loc := mustWarsaw(t)
+	run := time.Date(2026, 7, 13, 22, 45, 0, 0, time.UTC) // Tuesday 00:45 in Warsaw.
+	got, weekend := sourceDateForRun(run, SummaryModePreviousWorkday, loc)
+	if weekend {
+		t.Fatal("configured local Tuesday should not be skipped")
+	}
+	assertDate(t, got, "2026-07-13")
 }
 
 func TestRecapIsNotSentTwiceAfterRestart(t *testing.T) {
@@ -148,7 +182,9 @@ func (f *fakeStore) RecordDailySummarySend(ctx context.Context, userID int64, sc
 
 type fakeService struct {
 	noteCount  int
+	noteCounts map[int64]int
 	response   string
+	responses  map[int64]string
 	dailyCalls int
 }
 
@@ -157,7 +193,15 @@ func (f *fakeService) EnsureUser(ctx context.Context, telegramUserID int64, user
 }
 func (f *fakeService) DailyAtDate(ctx context.Context, userID int64, sourceDate time.Time, refresh bool) (string, int, error) {
 	f.dailyCalls++
-	return f.response, f.noteCount, nil
+	response := f.response
+	if f.responses != nil {
+		response = f.responses[userID]
+	}
+	noteCount := f.noteCount
+	if f.noteCounts != nil {
+		noteCount = f.noteCounts[userID]
+	}
+	return response, noteCount, nil
 }
 
 type fakeSender struct{ sent int }
