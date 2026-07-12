@@ -191,6 +191,8 @@ People highlight classification rules:
 - theme is the work/topic area and must be one of: communication, ownership, delivery, collaboration, technical_quality, reliability, hiring, release, process, other.
 - Never put a type value such as growth_topic or positive_signal in the theme field.
 - If no listed theme is clearly supported by the notes, use theme "other". Do not invent a theme.
+- Every people_highlights item must include non-empty person_name, type, theme, text, and source_note_ids.
+- Do not output a people_highlights item if person_name or text is missing from the notes.
 
 Return valid JSON only with this exact shape. Use empty arrays for empty sections and null for missing owner/due_hint:
 {

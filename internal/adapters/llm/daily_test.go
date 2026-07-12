@@ -21,6 +21,69 @@ func TestParseDailyDigestJSON(t *testing.T) {
 	}
 }
 
+func TestParseDailyDigestJSONSkipsPeopleHighlightMissingPersonName(t *testing.T) {
+	content := `{"short_summary":"x","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":" ","type":"commitment","theme":"delivery","text":"x","source_note_ids":[1]}],"decisions":[{"text":"Рішення лишається валідним.","source_note_ids":[2]}],"suggested_next_steps":[],"unclear_items":[]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 0 {
+		t.Fatalf("people highlights len = %d, want 0", len(digest.PeopleHighlights))
+	}
+	if len(digest.Decisions) != 1 {
+		t.Fatalf("decisions len = %d, want 1", len(digest.Decisions))
+	}
+}
+
+func TestParseDailyDigestJSONSkipsPeopleHighlightMissingText(t *testing.T) {
+	content := `{"short_summary":"x","open_loops":[{"title":"Уточнити ETA","owner":null,"due_hint":null,"source_note_ids":[1]}],"ticket_candidates":[],"people_highlights":[{"person_name":"Олена","type":"commitment","theme":"delivery","text":" ","source_note_ids":[1]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 0 {
+		t.Fatalf("people highlights len = %d, want 0", len(digest.PeopleHighlights))
+	}
+	if len(digest.OpenLoops) != 1 {
+		t.Fatalf("open loops len = %d, want 1", len(digest.OpenLoops))
+	}
+}
+
+func TestParseDailyDigestJSONSkipsInvalidHighlightMixedWithValidHighlights(t *testing.T) {
+	content := `{"short_summary":"x","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":" ","type":"commitment","theme":"delivery","text":"x","source_note_ids":[1]},{"person_name":"Олена","type":"commitment","theme":"delivery","text":"Пообіцяла оновити ETA.","source_note_ids":[2]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 1 {
+		t.Fatalf("people highlights len = %d, want 1", len(digest.PeopleHighlights))
+	}
+	if digest.PeopleHighlights[0].PersonName != "Олена" {
+		t.Fatalf("person name = %q, want Олена", digest.PeopleHighlights[0].PersonName)
+	}
+}
+
+func TestParseDailyDigestJSONAllHighlightsInvalidButOtherSectionsValid(t *testing.T) {
+	content := `{"short_summary":"","open_loops":[],"ticket_candidates":[{"title":"Підготувати тикет","context":"Контекст","owner":null,"source_note_ids":[1]}],"people_highlights":[{"person_name":"","type":"commitment","theme":"delivery","text":"x","source_note_ids":[1]},{"person_name":"Олена","type":"commitment","theme":"delivery","text":"","source_note_ids":[2]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 0 {
+		t.Fatalf("people highlights len = %d, want 0", len(digest.PeopleHighlights))
+	}
+	if len(digest.TicketCandidates) != 1 {
+		t.Fatalf("ticket candidates len = %d, want 1", len(digest.TicketCandidates))
+	}
+}
+
+func TestParseDailyDigestJSONRejectsUnusableDigest(t *testing.T) {
+	content := `{"short_summary":" ","open_loops":[{"title":" ","owner":null,"due_hint":null,"source_note_ids":[1]}],"ticket_candidates":[],"people_highlights":[{"person_name":"","type":"commitment","theme":"delivery","text":"x","source_note_ids":[1]}],"decisions":[{"text":" ","source_note_ids":[2]}],"suggested_next_steps":[],"unclear_items":[]}`
+	if _, err := ParseDailyDigestJSON(content); err == nil {
+		t.Fatal("expected unusable digest error")
+	}
+}
+
 func TestParseDailyDigestJSONRejectsInvalidEnum(t *testing.T) {
 	content := `{"short_summary":"x","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":"Олена","type":"score","theme":"delivery","text":"x","source_note_ids":[1]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
 	if _, err := ParseDailyDigestJSON(content); err == nil {
