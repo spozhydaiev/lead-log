@@ -22,6 +22,7 @@ type Config struct {
 	DailySummaryTime       string
 	DailySummaryTimezone   string
 	DailySummaryLocation   *time.Location
+	DailySummaryMode       string
 	LogLevel               string
 	LogFormat              string
 	ResponseLanguage       models.ResponseLanguage
@@ -34,9 +35,13 @@ func Load() Config {
 	if err != nil {
 		panic("invalid env var DAILY_SUMMARY_TIMEZONE: " + err.Error())
 	}
-	dailyTime := envOr("DAILY_SUMMARY_TIME", "18:00")
+	dailyTime := envOr("DAILY_SUMMARY_TIME", "08:45")
 	if _, err := time.Parse("15:04", dailyTime); err != nil {
 		panic("invalid env var DAILY_SUMMARY_TIME: " + err.Error())
+	}
+	dailyMode := envOr("DAILY_SUMMARY_MODE", "previous_workday")
+	if dailyMode != "previous_workday" && dailyMode != "current_day" {
+		panic("invalid env var DAILY_SUMMARY_MODE: must be previous_workday or current_day")
 	}
 
 	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
@@ -55,6 +60,7 @@ func Load() Config {
 		DailySummaryTime:       dailyTime,
 		DailySummaryTimezone:   dailyTimezone,
 		DailySummaryLocation:   dailyLocation,
+		DailySummaryMode:       dailyMode,
 		LogLevel:               envOr("LOG_LEVEL", "info"),
 		LogFormat:              envOr("LOG_FORMAT", "text"),
 		ResponseLanguage:       responseLanguage,

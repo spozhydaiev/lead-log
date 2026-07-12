@@ -41,8 +41,9 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
 - `ALLOWED_TELEGRAM_USER_IDS` — comma-separated Telegram user IDs allowed to use the bot. If empty, all users are allowed.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
-- `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `18:00`.
+- `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `08:45`.
 - `DAILY_SUMMARY_TIMEZONE` — IANA timezone used for scheduled daily summaries and `/daily` date boundaries. Defaults to `Europe/Warsaw`.
+- `DAILY_SUMMARY_MODE` — scheduled summary source-date mode. Supported values are `previous_workday` (default) and `current_day`.
 - `LOG_LEVEL` — structured log verbosity: `debug`, `info`, `warn`, or `error`. Defaults to `info`.
 - `LOG_FORMAT` — structured log output format: `text` or `json`. Defaults to `text`.
 
@@ -73,7 +74,7 @@ Privacy rules for logs:
 Example text log:
 
 ```text
-time=2026-07-12T14:00:00.000Z level=INFO msg="application starting" llm_model=gpt-4.1-mini llm_base_host=api.openai.com daily_summary_enabled=false daily_summary_time=18:00 daily_summary_timezone=Europe/Warsaw log_level=info log_format=text
+time=2026-07-12T14:00:00.000Z level=INFO msg="application starting" llm_model=gpt-4.1-mini llm_base_host=api.openai.com daily_summary_enabled=false daily_summary_time=08:45 daily_summary_timezone=Europe/Warsaw daily_summary_mode=previous_workday log_level=info log_format=text
 ```
 
 Example JSON log:
@@ -134,7 +135,9 @@ There is no separate migration command at the moment; migrations run automatical
 
 ## Scheduled daily summaries
 
-Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily summary automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 18:00 in `Europe/Warsaw`. The scheduler reuses the same read-only `Service.Daily` flow as `/daily`: it generates and caches the digest from raw notes, but does not create actions or people notes. It records completed sends so a restart around the scheduled time does not send the same user the same day twice.
+Set `DAILY_SUMMARY_ENABLED=true` to send a weekday morning recap automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 08:45 in `Europe/Warsaw` with `DAILY_SUMMARY_MODE=previous_workday`. In this mode the scheduler runs only Monday through Friday, skips Saturday and Sunday, and summarizes the previous workday: Tuesday through Friday recap the previous calendar day, while Monday recaps the previous Friday. If the selected source workday has zero notes, the scheduler does not call the LLM, does not send a Telegram message, and logs the skip without recording a send.
+
+Scheduled-send idempotency is keyed by user and source workday, so a restart does not resend the same recap for the same notes day. `DAILY_SUMMARY_MODE=current_day` keeps the older same-day source-date behavior for compatibility, while still using the configured morning time. Manual `/daily` and `/daily --refresh` are unchanged and continue to summarize the current day on demand.
 
 ## Bot commands
 

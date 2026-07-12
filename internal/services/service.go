@@ -152,11 +152,16 @@ func (s *Service) Daily(ctx context.Context, userID int64, refresh bool) (string
 }
 
 func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refresh bool) (string, error) {
+	response, _, err := s.DailyAtDate(ctx, userID, now, refresh)
+	return response, err
+}
+
+func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time.Time, refresh bool) (string, int, error) {
 	loc := s.dailyLocation
 	if loc == nil {
 		loc = time.Local
 	}
-	localNow := now.In(loc)
+	localNow := sourceDate.In(loc)
 	startOfDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
 	endOfDay := startOfDay.AddDate(0, 0, 1)
 	log := s.logger.With("operation", "daily", "user_id", userID, "period_start", startOfDay.Format(time.RFC3339), "period_end", endOfDay.Format(time.RFC3339), "timezone", loc.String())
@@ -165,27 +170,28 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 	source, err := s.store.RecentDailySource(ctx, userID, startOfDay, endOfDay)
 	if err != nil {
 		log.Error("daily failed", "failure_stage", "source loading", "operation", "daily.load_source", "error", err)
-		return "", fmt.Errorf("daily.load_source: %w", err)
+		return "", 0, fmt.Errorf("daily.load_source: %w", err)
 	}
 	if strings.TrimSpace(source) == "" {
 		log.Info("daily source loaded", "note_count", 0)
-		return s.language.CommonMessages().NoNotesToday, nil
+		return s.language.CommonMessages().NoNotesToday, 0, nil
 	}
 
 	scopeKey := scopedCacheKey(startOfDay.Format("2006-01-02"), s.language)
 	sourceHash := utils.HashStrings(source)
-	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
+	noteCount := countSourceNotes(source)
+	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", noteCount)
 	log.Info("daily source loaded")
 
 	if !refresh {
 		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "daily", scopeKey, sourceHash, PromptVersion)
 		if err != nil {
 			log.Error("daily failed", "failure_stage", "cache lookup", "operation", "daily.cache_lookup", "error", err)
-			return "", fmt.Errorf("daily.cache_lookup: %w", err)
+			return "", noteCount, fmt.Errorf("daily.cache_lookup: %w", err)
 		}
 		if cached != nil {
 			log.Info("cache hit", "cache_hit", true)
-			return cached.ResponseText + "\n\n" + s.language.CommonMessages().DailyCachedNotice, nil
+			return cached.ResponseText + "\n\n" + s.language.CommonMessages().DailyCachedNotice, noteCount, nil
 		}
 	}
 	log.Info("cache miss", "cache_hit", false)
@@ -194,28 +200,28 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 	digest, err := s.llm.ProcessDaily(ctx, source)
 	if err != nil {
 		log.Error("daily failed", "failure_stage", "LLM request", "operation", "daily.llm_request", "error", err)
-		return "", fmt.Errorf("daily.llm_request: %w", err)
+		return "", noteCount, fmt.Errorf("daily.llm_request: %w", err)
 	}
 	log.Info("LLM call completed", "operation", "daily.llm_request")
 	responseText := FormatDailyDigestForLanguage(digest, s.language)
 	if strings.TrimSpace(responseText) == "" {
 		err := fmt.Errorf("empty formatted daily digest")
 		log.Error("daily failed", "failure_stage", "formatting", "operation", "daily.formatting", "error", err)
-		return "", err
+		return "", noteCount, err
 	}
 	responseJSON, err := json.Marshal(digest)
 	if err != nil {
 		log.Error("daily failed", "failure_stage", "JSON parsing", "operation", "daily.parse_json", "error", err)
-		return "", fmt.Errorf("daily.parse_json: %w", err)
+		return "", noteCount, fmt.Errorf("daily.parse_json: %w", err)
 	}
 
 	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "daily", ScopeKey: scopeKey, PeriodStart: &startOfDay, PeriodEnd: &endOfDay, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: responseText, ResponseJSON: string(responseJSON)}); err != nil {
 		log.Error("daily failed", "failure_stage", "cache save", "operation", "daily.cache_save", "error", err)
-		return "", fmt.Errorf("daily.cache_save: %w", err)
+		return "", noteCount, fmt.Errorf("daily.cache_save: %w", err)
 	}
 	log.Info("digest cached", "operation", "daily.cache_save")
 	log.Info("formatted response sent", "operation", "daily.formatting", "response_length", len(responseText))
-	return responseText, nil
+	return responseText, noteCount, nil
 }
 
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
@@ -237,7 +243,8 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 	year, week := now.ISOWeek()
 	scopeKey := scopedCacheKey(fmt.Sprintf("%d-W%02d", year, week), s.language)
 	sourceHash := utils.HashStrings(source)
-	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
+	noteCount := countSourceNotes(source)
+	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", noteCount)
 	log.Info("weekly source loaded")
 
 	if !refresh {
