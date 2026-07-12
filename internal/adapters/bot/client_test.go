@@ -29,6 +29,7 @@ func TestSplitCommand(t *testing.T) {
 		{name: "now command with arg", text: "/now follow up", wantCmd: "/now", wantArg: "follow up"},
 		{name: "lowercases command", text: "/DAILY", wantCmd: "/daily", wantArg: ""},
 		{name: "strips bot username", text: "/daily@LeadLogBot --refresh", wantCmd: "/daily", wantArg: "--refresh"},
+		{name: "ask strips bot username", text: "/ask@LeadLogBot what happened", wantCmd: "/ask", wantArg: "what happened"},
 		{name: "trims arg", text: "/done   123  ", wantCmd: "/done", wantArg: "123"},
 	}
 
@@ -49,6 +50,7 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		"/now <text> — save and immediately structure a note",
 		"/daily --refresh — regenerate the daily digest",
 		"/weekly --refresh — regenerate the weekly digest",
+		"/ask <question> — ask about your saved work history with source notes",
 		"regular text without /note",
 	} {
 		if !strings.Contains(help, want) {
@@ -60,6 +62,52 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		if strings.Contains(help, removed) {
 			t.Fatalf("help text still exposes %q\n%s", removed, help)
 		}
+	}
+}
+
+func TestHandleMessageAskRoutesToAskService(t *testing.T) {
+	fake := &fakeBotService{askResponse: "answer"}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(100, "/ask what did I do yesterday?"), func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.askCalls != 1 || fake.lastQuestion != "what did I do yesterday?" {
+		t.Fatalf("Ask calls/question = %d/%q", fake.askCalls, fake.lastQuestion)
+	}
+	if fake.captureCalls != 0 || fake.addCalls != 0 {
+		t.Fatalf("/ask must not capture notes: capture=%d add=%d", fake.captureCalls, fake.addCalls)
+	}
+	if len(replies) != 1 || replies[0] != "answer" {
+		t.Fatalf("replies=%#v", replies)
+	}
+}
+
+func TestHandleMessageAskRequiresText(t *testing.T) {
+	for _, text := range []string{"/ask", "/ask    "} {
+		fake := &fakeBotService{}
+		b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+		var replies []string
+		b.handleMessageWithReply(testContext(), testMessage(100, text), func(chatID int64, text string) { replies = append(replies, text) })
+		if fake.askCalls != 0 {
+			t.Fatalf("Ask called for empty question")
+		}
+		if len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().AskUsage {
+			t.Fatalf("replies=%#v", replies)
+		}
+	}
+}
+
+func TestHandleMessageAskDuplicateSkipsLLMAndReply(t *testing.T) {
+	fake := &fakeBotService{askResponse: "answer", claims: []store.TelegramUpdateClaim{{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()}, {Claimed: false, Status: store.TelegramUpdateStatusProcessed, AttemptCount: 1}}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	msg := testMessage(100, "/ask@LeadLogBot question")
+	b.handleMessageWithUpdateAndReply(testContext(), 558, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	b.handleMessageWithUpdateAndReply(testContext(), 558, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.askCalls != 1 {
+		t.Fatalf("Ask calls=%d, want 1", fake.askCalls)
+	}
+	if len(replies) != 1 || replies[0] != "answer" {
+		t.Fatalf("replies=%#v", replies)
 	}
 }
 
@@ -222,6 +270,9 @@ type fakeBotService struct {
 	doneCalls       int
 	doneResponse    string
 	claims          []store.TelegramUpdateClaim
+	askCalls        int
+	askResponse     string
+	lastQuestion    string
 }
 
 func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -260,6 +311,14 @@ func (f *fakeBotService) Daily(ctx context.Context, userID int64, refresh bool) 
 	return "", nil
 }
 func (f *fakeBotService) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
+	return "", nil
+}
+func (f *fakeBotService) Ask(ctx context.Context, userID int64, question string) (string, error) {
+	f.askCalls++
+	f.lastQuestion = question
+	if f.askResponse != "" {
+		return f.askResponse, nil
+	}
 	return "", nil
 }
 func (f *fakeBotService) ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error) {

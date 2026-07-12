@@ -99,21 +99,24 @@ type CommonMessages struct {
 	NoteUsage          string
 	UnknownCommand     string
 	GenericError       string
+	AskUsage           string
+	AskNoResults       string
+	AskTooLong         string
 }
 
 func (l ResponseLanguage) CommonMessages() CommonMessages {
 	switch l {
 	case LanguageUkrainian:
 		return CommonMessages{
-			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp, NoteUsage: "Використання: /note <текст>", UnknownCommand: "Невідома команда. Використайте /help, щоб побачити доступні команди.", GenericError: "Щось пішло не так. Спробуйте пізніше.",
+			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp, NoteUsage: "Використання: /note <текст>", UnknownCommand: "Невідома команда. Використайте /help, щоб побачити доступні команди.", GenericError: "Щось пішло не так. Спробуйте пізніше.", AskUsage: "Використання: /ask <question>", AskNoResults: "Я не знайшов у нотатках достатнього контексту для відповіді. Спробуй уточнити людину, тікет або період.", AskTooLong: "Питання занадто довге. Спробуй коротше формулювання.",
 		}
 	case LanguagePolish:
 		return CommonMessages{
-			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp, NoteUsage: "Użycie: /note <tekst>", UnknownCommand: "Nieznane polecenie. Użyj /help, aby zobaczyć dostępne polecenia.", GenericError: "Coś poszło nie tak. Spróbuj ponownie później.",
+			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp, NoteUsage: "Użycie: /note <tekst>", UnknownCommand: "Nieznane polecenie. Użyj /help, aby zobaczyć dostępne polecenia.", GenericError: "Coś poszło nie tak. Spróbuj ponownie później.", AskUsage: "Użycie: /ask <question>", AskNoResults: "Nie znalazłem w notatkach wystarczającego kontekstu do odpowiedzi. Spróbuj doprecyzować osobę, ticket albo okres.", AskTooLong: "Pytanie jest za długie. Spróbuj krótszego sformułowania.",
 		}
 	default:
 		return CommonMessages{
-			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp, NoteUsage: "Usage: /note <text>", UnknownCommand: "Unknown command. Use /help to see available commands.", GenericError: "Something went wrong. Please try again later.",
+			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp, NoteUsage: "Usage: /note <text>", UnknownCommand: "Unknown command. Use /help to see available commands.", GenericError: "Something went wrong. Please try again later.", AskUsage: "Usage: /ask <question>", AskNoResults: "I could not find enough context in your notes to answer. Try specifying a person, ticket, or date range.", AskTooLong: "The question is too long. Try a shorter wording.",
 		}
 	}
 }
@@ -129,6 +132,7 @@ Commands:
 /daily --refresh — regenerate the daily digest
 /weekly — weekly digest for the last 7 days
 /weekly --refresh — regenerate the weekly digest
+/ask <question> — ask about your saved work history with source notes
 
 Tip: you can send regular text without /note. It will be saved as a raw note for /daily.`
 
@@ -143,6 +147,7 @@ const ukHelp = `LeadLog Bot
 /daily --refresh — згенерувати денний дайджест заново
 /weekly — тижневий дайджест за останні 7 днів
 /weekly --refresh — згенерувати тижневий дайджест заново
+/ask <question> — запитати про збережену робочу історію з джерелами
 
 Порада: можна надіслати звичайний текст без /note. Він збережеться як сира нотатка для /daily.`
 
@@ -157,5 +162,6 @@ Polecenia:
 /daily --refresh — wygeneruj dzienny digest ponownie
 /weekly — tygodniowy digest z ostatnich 7 dni
 /weekly --refresh — wygeneruj tygodniowy digest ponownie
+/ask <question> — zapytaj o zapisaną historię pracy ze źródłami
 
 Wskazówka: możesz wysłać zwykły tekst bez /note. Zostanie zapisany jako surowa notatka dla /daily.`

@@ -29,6 +29,7 @@ type service interface {
 	Done(ctx context.Context, userID int64, arg string) (string, error)
 	Daily(ctx context.Context, userID int64, refresh bool) (string, error)
 	Weekly(ctx context.Context, userID int64, refresh bool) (string, error)
+	Ask(ctx context.Context, userID int64, question string) (string, error)
 	ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error)
 	MarkTelegramUpdateProcessed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time) error
 	MarkTelegramUpdateFailed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time, cause error) error
@@ -159,6 +160,12 @@ func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int6
 		response, err = b.svc.Daily(ctx, userID, utils.HasRefreshFlag(arg))
 	case "/weekly":
 		response, err = b.svc.Weekly(ctx, userID, utils.HasRefreshFlag(arg))
+	case "/ask":
+		if strings.TrimSpace(arg) == "" {
+			response = b.cfg.ResponseLanguage.CommonMessages().AskUsage
+			break
+		}
+		response, err = b.svc.Ask(ctx, userID, arg)
 	default:
 		if cmd != "" {
 			response = b.cfg.ResponseLanguage.CommonMessages().UnknownCommand

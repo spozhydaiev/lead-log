@@ -50,6 +50,20 @@ func (m *MockClientLLM) SummarizeWeekly(ctx context.Context, input string) (stri
 	return input, nil
 }
 
+func (m *MockClientLLM) PlanAskQuery(ctx context.Context, question, currentDate, timezone, language string) (models.AskIntent, error) {
+	return models.AskIntent{IntentType: models.AskIntentGeneralContext, TextQuery: question, DateRange: models.AskDateRange{Type: models.AskDateUnspecified}, Limit: 20}, nil
+}
+
+func (m *MockClientLLM) GenerateAskAnswer(ctx context.Context, question string, intent models.AskIntent, candidates []models.AskCandidate, language string) (models.AskAnswer, error) {
+	ids := []int64{}
+	dates := []string{}
+	if len(candidates) > 0 {
+		ids = append(ids, candidates[0].SourceNoteID)
+		dates = append(dates, candidates[0].Date)
+	}
+	return models.AskAnswer{Answer: "Based on your notes: " + question, Items: []models.AskAnswerItem{{Text: "See source", SourceNoteIDs: ids, SourceDates: dates, Confidence: "confirmed"}}}, nil
+}
+
 func (m *MockClientLLM) Model() string {
 	return "mock"
 }
