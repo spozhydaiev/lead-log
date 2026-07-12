@@ -55,7 +55,7 @@ func Load() Config {
 		LLMBaseURL:             envOr("LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:              mustEnv("LLM_API_KEY"),
 		LLMModel:               envOr("LLM_MODEL", "gpt-4.1-mini"),
-		AllowedTelegramUserIDs: parseAllowedUsers(os.Getenv("ALLOWED_TELEGRAM_USER_IDS")),
+		AllowedTelegramUserIDs: mustAllowedUsers(os.Getenv("ALLOWED_TELEGRAM_USER_IDS")),
 		DailySummaryEnabled:    parseBool(os.Getenv("DAILY_SUMMARY_ENABLED")),
 		DailySummaryTime:       dailyTime,
 		DailySummaryTimezone:   dailyTimezone,
@@ -81,6 +81,18 @@ func envOr(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func mustAllowedUsers(raw string) map[int64]bool {
+	users := parseAllowedUsers(raw)
+	if len(users) == 0 {
+		panic("missing env var: ALLOWED_TELEGRAM_USER_IDS")
+	}
+	return users
+}
+
+func IsTelegramUserAllowed(allowed map[int64]bool, telegramUserID int64) bool {
+	return len(allowed) > 0 && allowed[telegramUserID]
 }
 
 func parseAllowedUsers(raw string) map[int64]bool {

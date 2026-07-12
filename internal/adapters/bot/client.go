@@ -15,8 +15,18 @@ import (
 type Bot struct {
 	api    *tgbotapi.BotAPI
 	cfg    config.Config
-	svc    *svc.Service
+	svc    service
 	logger *slog.Logger
+}
+
+type service interface {
+	EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error)
+	CaptureNote(ctx context.Context, userID int64, raw string) (string, error)
+	AddNote(ctx context.Context, userID int64, raw string) (string, error)
+	OpenActions(ctx context.Context, userID int64) (string, error)
+	Done(ctx context.Context, userID int64, arg string) (string, error)
+	Daily(ctx context.Context, userID int64, refresh bool) (string, error)
+	Weekly(ctx context.Context, userID int64, refresh bool) (string, error)
 }
 
 func New(cfg config.Config, svc *svc.Service, logger ...*slog.Logger) (*Bot, error) {
@@ -56,23 +66,27 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
+	b.handleMessageWithReply(ctx, msg, b.reply)
+}
+
+func (b *Bot) handleMessageWithReply(ctx context.Context, msg *tgbotapi.Message, reply func(chatID int64, text string)) {
 	telegramUserID := msg.From.ID
-	if len(b.cfg.AllowedTelegramUserIDs) > 0 && !b.cfg.AllowedTelegramUserIDs[telegramUserID] {
-		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().AccessDenied)
+	if !config.IsTelegramUserAllowed(b.cfg.AllowedTelegramUserIDs, telegramUserID) {
+		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().AccessDenied)
 		return
 	}
 
 	userID, err := b.svc.EnsureUser(ctx, telegramUserID, msg.From.UserName)
 	if err != nil {
 		b.logger.Error("command failed", "operation", "bot.ensure_user", "telegram_user_id", telegramUserID, "error", err)
-		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UserInitFailed)
+		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UserInitFailed)
 		return
 	}
 
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", "unsupported")
-		b.reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UnsupportedText)
+		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UnsupportedText)
 		return
 	}
 
@@ -91,6 +105,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	case "/start", "/help":
 		response = b.cfg.ResponseLanguage.CommonMessages().HelpText
 	case "/note":
+		if strings.TrimSpace(arg) == "" {
+			response = b.cfg.ResponseLanguage.CommonMessages().NoteUsage
+			break
+		}
 		response, err = b.svc.CaptureNote(ctx, userID, arg)
 	case "/now":
 		response, err = b.svc.AddNote(ctx, userID, arg)
@@ -103,15 +121,19 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	case "/weekly":
 		response, err = b.svc.Weekly(ctx, userID, utils.HasRefreshFlag(arg))
 	default:
+		if cmd != "" {
+			response = b.cfg.ResponseLanguage.CommonMessages().UnknownCommand
+			break
+		}
 		// Treat normal text as a quick note to reduce capture friction.
 		response, err = b.svc.CaptureNote(ctx, userID, text)
 	}
 	if err != nil {
 		b.logger.Error("command failed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName, "error", err)
-		b.reply(msg.Chat.ID, "Error: "+err.Error())
+		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().GenericError)
 		return
 	}
-	b.reply(msg.Chat.ID, response)
+	reply(msg.Chat.ID, response)
 	b.logger.Info("command completed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName)
 }
 

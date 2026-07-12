@@ -33,13 +33,13 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `TELEGRAM_BOT_TOKEN` — Telegram bot token from BotFather.
 - `DATABASE_URL` — Postgres connection string.
 - `LLM_API_KEY` — API key for the configured OpenAI-compatible LLM provider.
+- `ALLOWED_TELEGRAM_USER_IDS` — comma-separated Telegram user IDs allowed to use the bot. Startup fails when the parsed allowlist is empty; this prevents accidental public access.
 
 ### Optional environment variables
 
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
 - `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
-- `ALLOWED_TELEGRAM_USER_IDS` — comma-separated Telegram user IDs allowed to use the bot. If empty, all users are allowed.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `08:45`.
 - `DAILY_SUMMARY_TIMEZONE` — IANA timezone used for scheduled daily summaries and `/daily` date boundaries. Defaults to `Europe/Warsaw`.
@@ -119,7 +119,7 @@ Stop services:
 docker compose down
 ```
 
-Make sure the required environment variables are available to the app service before starting it.
+Make sure the required environment variables, including a non-empty `ALLOWED_TELEGRAM_USER_IDS` allowlist, are available to the app service before starting it.
 
 ## Migrations
 
@@ -135,15 +135,15 @@ There is no separate migration command at the moment; migrations run automatical
 
 ## Scheduled daily summaries
 
-Set `DAILY_SUMMARY_ENABLED=true` to send a weekday morning recap automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 08:45 in `Europe/Warsaw` with `DAILY_SUMMARY_MODE=previous_workday`. In this mode the scheduler runs only Monday through Friday, skips Saturday and Sunday, and summarizes the previous workday: Tuesday through Friday recap the previous calendar day, while Monday recaps the previous Friday. If the selected source workday has zero notes, the scheduler does not call the LLM, does not send a Telegram message, and logs the skip without recording a send.
+Set `DAILY_SUMMARY_ENABLED=true` to send a weekday morning recap automatically to every explicitly allowed user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 08:45 in `Europe/Warsaw` with `DAILY_SUMMARY_MODE=previous_workday`. In this mode the scheduler runs only Monday through Friday, skips Saturday and Sunday, and summarizes the previous workday: Tuesday through Friday recap the previous calendar day, while Monday recaps the previous Friday. If the selected source workday has zero notes, the scheduler does not call the LLM, does not send a Telegram message, and logs the skip without recording a send.
 
 Scheduled-send idempotency is keyed by user and source workday, so a restart does not resend the same recap for the same notes day. `DAILY_SUMMARY_MODE=current_day` keeps the older same-day source-date behavior for compatibility, while still using the configured morning time. Manual `/daily` and `/daily --refresh` are unchanged and continue to summarize the current day on demand.
 
 ## Bot commands
 
 - `/start` or `/help` — show help.
-- `/note <text>` — save a raw manager note without immediate AI processing.
-- Plain text — save a raw manager note without typing `/note` and without immediate AI processing.
+- `/note <text>` — save a raw manager note without immediate AI processing. `/note` without text is rejected with a usage message and does not create a note.
+- Plain text — save a raw manager note without typing `/note` and without immediate AI processing. Unknown slash commands are rejected with a localized help hint and are not saved as notes.
 - `/now <text>` — save and immediately structure a manager note through the LLM parsing flow.
 - `/open` — show open loops created only by explicit `/now` processing.
 - `/done <action_id>` — mark an open loop as done.
