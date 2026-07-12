@@ -2,12 +2,8 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -436,92 +432,6 @@ func (s *Store) RecentWeeklySource(ctx context.Context, userID int64, since time
 	return b.String(), rows.Err()
 }
 
-const dailyPeopleNoteInsertSQL = `
-	INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review, source_note_ids, idempotency_key)
-	VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8)
-	ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-`
-
-const dailyActionInsertSQL = `
-	INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type, source_note_ids, idempotency_key)
-	VALUES ($1, NULL, $2::bigint, $3, $4, $5, $6)
-	ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-`
-
-func (s *Store) PersistDailyStructured(ctx context.Context, userID int64, start, end time.Time, scopeKey string, parsed models.ParsedNote) error {
-	_ = start
-	_ = end
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	personIDs := map[string]int64{}
-	ensurePerson := func(name string) (int64, error) {
-		name = strings.TrimSpace(name)
-		key := NormalizePersonName(name)
-		if key == "" {
-			return 0, fmt.Errorf("person name is empty")
-		}
-		if id, ok := personIDs[key]; ok {
-			return id, nil
-		}
-		id, err := upsertPerson(ctx, tx, userID, name)
-		if err != nil {
-			return 0, err
-		}
-		personIDs[key] = id
-		return id, nil
-	}
-
-	for _, name := range parsed.PeopleMentioned {
-		if strings.TrimSpace(name) == "" {
-			continue
-		}
-		if _, err := ensurePerson(name); err != nil {
-			return err
-		}
-	}
-
-	for _, pn := range parsed.PeopleNotes {
-		name := strings.TrimSpace(pn.PersonName)
-		text := strings.TrimSpace(pn.Text)
-		if name == "" || text == "" {
-			continue
-		}
-		pid, err := ensurePerson(name)
-		if err != nil {
-			return err
-		}
-		key := dailyItemIdempotencyKey(userID, "people_note", scopeKey, pn.SourceNoteIDs, NormalizePersonName(name), "", text)
-		if _, err := tx.Exec(ctx, dailyPeopleNoteInsertSQL, userID, pid, emptyTo(pn.Type, "context"), pn.Theme, text, pn.IncludeInReview, sortedInt64s(pn.SourceNoteIDs), key); err != nil {
-			return err
-		}
-	}
-
-	for _, action := range parsed.Actions {
-		title := strings.TrimSpace(action.Title)
-		if title == "" {
-			continue
-		}
-		var linkedPersonID *int64
-		if strings.TrimSpace(action.LinkedPersonName) != "" {
-			pid, err := ensurePerson(action.LinkedPersonName)
-			if err != nil {
-				return err
-			}
-			linkedPersonID = &pid
-		}
-		key := dailyItemIdempotencyKey(userID, "action", scopeKey, action.SourceNoteIDs, NormalizePersonName(action.LinkedPersonName), action.OutputType, title)
-		if _, err := tx.Exec(ctx, dailyActionInsertSQL, userID, linkedPersonID, title, action.OutputType, sortedInt64s(action.SourceNoteIDs), key); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit(ctx)
-}
-
 func emptyTo(v, fallback string) string {
 	if strings.TrimSpace(v) == "" {
 		return fallback
@@ -709,34 +619,4 @@ func addAlias(ctx context.Context, tx pgx.Tx, userID, personID int64, alias stri
 		DO UPDATE SET person_id = EXCLUDED.person_id, alias = EXCLUDED.alias
 	`, userID, personID, alias, normalized)
 	return err
-}
-
-var repeatedSpace = regexp.MustCompile(`\s+`)
-
-func dailyItemIdempotencyKey(userID int64, kind, scopeKey string, sourceNoteIDs []int64, linkedPersonKey, outputType, text string) string {
-	ids := sortedInt64s(sourceNoteIDs)
-	parts := []string{fmt.Sprintf("user:%d", userID), "kind:" + normalizeDailyKeyPart(kind), "scope:" + normalizeDailyKeyPart(scopeKey), "person:" + normalizeDailyKeyPart(linkedPersonKey), "output:" + normalizeDailyKeyPart(outputType)}
-	if len(ids) > 0 {
-		parts = append(parts, "source_notes:"+fmt.Sprint(ids))
-	} else {
-		parts = append(parts, "text:"+normalizeDailyKeyPart(text))
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
-	return hex.EncodeToString(sum[:])
-}
-
-func normalizeDailyKeyPart(s string) string {
-	s = strings.TrimSpace(strings.ToLower(s))
-	s = repeatedSpace.ReplaceAllString(s, " ")
-	s = strings.TrimRight(s, ".,;:!?…")
-	return strings.TrimSpace(s)
-}
-
-func sortedInt64s(ids []int64) []int64 {
-	if len(ids) == 0 {
-		return nil
-	}
-	out := append([]int64(nil), ids...)
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }
