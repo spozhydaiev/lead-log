@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/spozhydaiev/lead-log/internal/adapters/store"
 	"github.com/spozhydaiev/lead-log/internal/config"
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
@@ -130,6 +132,60 @@ func TestHandleMessagePlainTextStillCaptures(t *testing.T) {
 	}
 }
 
+func TestHandleMessagePlainTextDuplicateSkipsSideEffectsAndReply(t *testing.T) {
+	fake := &fakeBotService{captureResponse: "saved", claims: []store.TelegramUpdateClaim{
+		{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()},
+		{Claimed: false, Status: store.TelegramUpdateStatusProcessed, AttemptCount: 1},
+	}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	msg := testMessage(100, "follow up without slash")
+	b.handleMessageWithUpdateAndReply(testContext(), 555, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	b.handleMessageWithUpdateAndReply(testContext(), 555, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.captureCalls != 1 {
+		t.Fatalf("CaptureNote calls = %d, want 1", fake.captureCalls)
+	}
+	if len(replies) != 1 || replies[0] != "saved" {
+		t.Fatalf("replies = %#v, want one saved", replies)
+	}
+}
+
+func TestHandleMessageNowDuplicateSkipsLLMAndReply(t *testing.T) {
+	fake := &fakeBotService{addResponse: "structured", claims: []store.TelegramUpdateClaim{
+		{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()},
+		{Claimed: false, Status: store.TelegramUpdateStatusProcessed, AttemptCount: 1},
+	}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	msg := testMessage(100, "/now follow up")
+	b.handleMessageWithUpdateAndReply(testContext(), 556, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	b.handleMessageWithUpdateAndReply(testContext(), 556, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.addCalls != 1 {
+		t.Fatalf("AddNote calls = %d, want 1", fake.addCalls)
+	}
+	if len(replies) != 1 || replies[0] != "structured" {
+		t.Fatalf("replies = %#v, want one structured", replies)
+	}
+}
+
+func TestHandleMessageDoneDuplicateSkipsSecondDoneAndReply(t *testing.T) {
+	fake := &fakeBotService{doneResponse: "done", claims: []store.TelegramUpdateClaim{
+		{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()},
+		{Claimed: false, Status: store.TelegramUpdateStatusProcessed, AttemptCount: 1},
+	}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	msg := testMessage(100, "/done 42")
+	b.handleMessageWithUpdateAndReply(testContext(), 557, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	b.handleMessageWithUpdateAndReply(testContext(), 557, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.doneCalls != 1 {
+		t.Fatalf("Done calls = %d, want 1", fake.doneCalls)
+	}
+	if len(replies) != 1 || replies[0] != "done" {
+		t.Fatalf("replies = %#v, want one done", replies)
+	}
+}
+
 func TestHandleMessageServiceErrorUsesGenericReply(t *testing.T) {
 	fake := &fakeBotService{captureErr: errTestService}
 	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
@@ -161,6 +217,11 @@ type fakeBotService struct {
 	lastRaw         string
 	captureResponse string
 	captureErr      error
+	addCalls        int
+	addResponse     string
+	doneCalls       int
+	doneResponse    string
+	claims          []store.TelegramUpdateClaim
 }
 
 func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -179,12 +240,20 @@ func (f *fakeBotService) CaptureNote(ctx context.Context, userID int64, raw stri
 	return "saved", nil
 }
 func (f *fakeBotService) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
+	f.addCalls++
+	if f.addResponse != "" {
+		return f.addResponse, nil
+	}
 	return "", nil
 }
 func (f *fakeBotService) OpenActions(ctx context.Context, userID int64) (string, error) {
 	return "", nil
 }
 func (f *fakeBotService) Done(ctx context.Context, userID int64, arg string) (string, error) {
+	f.doneCalls++
+	if f.doneResponse != "" {
+		return f.doneResponse, nil
+	}
 	return "", nil
 }
 func (f *fakeBotService) Daily(ctx context.Context, userID int64, refresh bool) (string, error) {
@@ -192,4 +261,27 @@ func (f *fakeBotService) Daily(ctx context.Context, userID int64, refresh bool) 
 }
 func (f *fakeBotService) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
 	return "", nil
+}
+func (f *fakeBotService) ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error) {
+	if len(f.claims) > 0 {
+		c := f.claims[0]
+		f.claims = f.claims[1:]
+		return c, nil
+	}
+	return store.TelegramUpdateClaim{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()}, nil
+}
+func (f *fakeBotService) MarkTelegramUpdateProcessed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time) error {
+	return nil
+}
+func (f *fakeBotService) MarkTelegramUpdateFailed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time, cause error) error {
+	return nil
+}
+func (f *fakeBotService) CaptureNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	return f.CaptureNote(ctx, userID, raw)
+}
+func (f *fakeBotService) AddNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	return f.AddNote(ctx, userID, raw)
+}
+func (f *fakeBotService) DoneForTelegramUpdate(ctx context.Context, userID int64, arg string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	return f.Done(ctx, userID, arg)
 }

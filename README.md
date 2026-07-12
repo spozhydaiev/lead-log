@@ -39,6 +39,7 @@ The app reads configuration from environment variables. A local `.env` file is a
 
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
+- `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` — how long an in-flight Telegram update may stay `processing` before a retry can reclaim it. Defaults to `2m`, which leaves headroom above the 45-second LLM HTTP timeout.
 - `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `08:45`.
@@ -153,3 +154,12 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 - `/weekly --refresh` — regenerate the weekly digest instead of using cache.
 
 Out of MVP scope for now: person context, 1:1 agenda generation, performance review packs, Jira integration, calendar integration, monitoring integrations, voice transcription, web UI, multi-user workspaces, and billing. Existing database tables and migrations for older data are left in place for backward compatibility.
+
+
+### Telegram update idempotency
+
+Incoming authorized Telegram text messages are claimed in a persistent PostgreSQL inbox table (`telegram_updates`) before command handling. The table stores Telegram update/message identity, status (`processing`, `processed`, `failed`), timestamps, attempt count, command name, and a safely truncated internal error. Raw message text is not stored in this table.
+
+`telegram_update_id` is unique, with an additional `(telegram_chat_id, telegram_message_id)` unique index as a message-level fallback. Duplicate updates that are already `processed` or currently `processing` are skipped without rerunning service logic, calling the LLM, mutating domain tables, or sending another Telegram response. Failed updates can be reclaimed until the built-in attempt cap is reached; `processing` updates older than `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` can be reclaimed after a crash.
+
+For raw note capture, `/now`, and `/done`, the domain mutation and `processed` marker are committed in one short database transaction after the update has been claimed. `/now` still performs the LLM call before that transaction so the app does not hold a database transaction open during the HTTP request. Read-only commands and validation responses are marked processed before sending the Telegram response. If the database commit succeeds but sending the Telegram response fails, the update remains processed and automatic replay is intentionally skipped; domain correctness is preferred over response resend for this MVP.

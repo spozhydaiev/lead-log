@@ -12,20 +12,21 @@ import (
 )
 
 type Config struct {
-	TelegramBotToken       string
-	DatabaseURL            string
-	LLMBaseURL             string
-	LLMAPIKey              string
-	LLMModel               string
-	AllowedTelegramUserIDs map[int64]bool
-	DailySummaryEnabled    bool
-	DailySummaryTime       string
-	DailySummaryTimezone   string
-	DailySummaryLocation   *time.Location
-	DailySummaryMode       string
-	LogLevel               string
-	LogFormat              string
-	ResponseLanguage       models.ResponseLanguage
+	TelegramBotToken                string
+	DatabaseURL                     string
+	LLMBaseURL                      string
+	LLMAPIKey                       string
+	LLMModel                        string
+	AllowedTelegramUserIDs          map[int64]bool
+	DailySummaryEnabled             bool
+	DailySummaryTime                string
+	DailySummaryTimezone            string
+	DailySummaryLocation            *time.Location
+	DailySummaryMode                string
+	LogLevel                        string
+	LogFormat                       string
+	ResponseLanguage                models.ResponseLanguage
+	TelegramUpdateProcessingTimeout time.Duration
 }
 
 func Load() Config {
@@ -44,26 +45,32 @@ func Load() Config {
 		panic("invalid env var DAILY_SUMMARY_MODE: must be previous_workday or current_day")
 	}
 
+	telegramUpdateProcessingTimeout, err := time.ParseDuration(envOr("TELEGRAM_UPDATE_PROCESSING_TIMEOUT", "2m"))
+	if err != nil || telegramUpdateProcessingTimeout <= 45*time.Second {
+		panic("invalid env var TELEGRAM_UPDATE_PROCESSING_TIMEOUT: must be a duration greater than 45s")
+	}
+
 	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
 	if err != nil {
 		panic(err.Error())
 	}
 
 	return Config{
-		TelegramBotToken:       mustEnv("TELEGRAM_BOT_TOKEN"),
-		DatabaseURL:            mustEnv("DATABASE_URL"),
-		LLMBaseURL:             envOr("LLM_BASE_URL", "https://api.openai.com/v1"),
-		LLMAPIKey:              mustEnv("LLM_API_KEY"),
-		LLMModel:               envOr("LLM_MODEL", "gpt-4.1-mini"),
-		AllowedTelegramUserIDs: mustAllowedUsers(os.Getenv("ALLOWED_TELEGRAM_USER_IDS")),
-		DailySummaryEnabled:    parseBool(os.Getenv("DAILY_SUMMARY_ENABLED")),
-		DailySummaryTime:       dailyTime,
-		DailySummaryTimezone:   dailyTimezone,
-		DailySummaryLocation:   dailyLocation,
-		DailySummaryMode:       dailyMode,
-		LogLevel:               envOr("LOG_LEVEL", "info"),
-		LogFormat:              envOr("LOG_FORMAT", "text"),
-		ResponseLanguage:       responseLanguage,
+		TelegramBotToken:                mustEnv("TELEGRAM_BOT_TOKEN"),
+		DatabaseURL:                     mustEnv("DATABASE_URL"),
+		LLMBaseURL:                      envOr("LLM_BASE_URL", "https://api.openai.com/v1"),
+		LLMAPIKey:                       mustEnv("LLM_API_KEY"),
+		LLMModel:                        envOr("LLM_MODEL", "gpt-4.1-mini"),
+		AllowedTelegramUserIDs:          mustAllowedUsers(os.Getenv("ALLOWED_TELEGRAM_USER_IDS")),
+		DailySummaryEnabled:             parseBool(os.Getenv("DAILY_SUMMARY_ENABLED")),
+		DailySummaryTime:                dailyTime,
+		DailySummaryTimezone:            dailyTimezone,
+		DailySummaryLocation:            dailyLocation,
+		DailySummaryMode:                dailyMode,
+		LogLevel:                        envOr("LOG_LEVEL", "info"),
+		LogFormat:                       envOr("LOG_FORMAT", "text"),
+		ResponseLanguage:                responseLanguage,
+		TelegramUpdateProcessingTimeout: telegramUpdateProcessingTimeout,
 	}
 }
 

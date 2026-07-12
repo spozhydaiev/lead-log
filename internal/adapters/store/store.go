@@ -14,6 +14,30 @@ import (
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
+const (
+	TelegramUpdateStatusProcessing = "processing"
+	TelegramUpdateStatusProcessed  = "processed"
+	TelegramUpdateStatusFailed     = "failed"
+	TelegramUpdateMaxAttempts      = 3
+)
+
+type TelegramUpdateMeta struct {
+	UpdateID       int64
+	ChatID         int64
+	MessageID      int64
+	TelegramUserID int64
+	UserID         int64
+	Command        string
+}
+
+type TelegramUpdateClaim struct {
+	Claimed             bool
+	Status              string
+	AttemptCount        int
+	StaleReclaimed      bool
+	ProcessingStartedAt time.Time
+}
+
 type Store struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
@@ -393,4 +417,191 @@ func (s *Store) RecordDailySummarySend(ctx context.Context, userID int64, scopeK
 		s.logDBError("store.record_daily_summary_send", err)
 	}
 	return err
+}
+
+func (s *Store) ClaimTelegramUpdate(ctx context.Context, meta TelegramUpdateMeta, staleAfter time.Duration) (TelegramUpdateClaim, error) {
+	var claim TelegramUpdateClaim
+	if meta.UpdateID == 0 && (meta.ChatID == 0 || meta.MessageID == 0) {
+		return claim, fmt.Errorf("telegram update identity is empty")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return claim, err
+	}
+	defer tx.Rollback(ctx)
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO telegram_updates (telegram_update_id, telegram_chat_id, telegram_message_id, telegram_user_id, user_id, status, command, processing_started_at, attempt_count)
+		VALUES ($1,$2,$3,$4,$5,'processing',$6,now(),1)
+		ON CONFLICT DO NOTHING
+		RETURNING status, attempt_count, processing_started_at
+	`, meta.UpdateID, meta.ChatID, meta.MessageID, meta.TelegramUserID, meta.UserID, meta.Command).Scan(&claim.Status, &claim.AttemptCount, &claim.ProcessingStartedAt)
+	if err == nil {
+		claim.Claimed = true
+		if err := tx.Commit(ctx); err != nil {
+			return TelegramUpdateClaim{}, err
+		}
+		return claim, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return claim, err
+	}
+
+	staleSeconds := int64(staleAfter.Seconds())
+	err = tx.QueryRow(ctx, `
+		UPDATE telegram_updates
+		SET status='processing', processing_started_at=now(), failed_at=NULL, last_error=NULL, attempt_count=attempt_count+1, command=$6, user_id=$5
+		WHERE (telegram_update_id=$1 OR (telegram_chat_id=$2 AND telegram_message_id=$3))
+		  AND status IN ('failed','processing')
+		  AND attempt_count < $7
+		  AND (status='failed' OR processing_started_at < now() - make_interval(secs => $8))
+		RETURNING status, attempt_count, processing_started_at, (status='processing')
+	`, meta.UpdateID, meta.ChatID, meta.MessageID, meta.TelegramUserID, meta.UserID, meta.Command, TelegramUpdateMaxAttempts, staleSeconds).Scan(&claim.Status, &claim.AttemptCount, &claim.ProcessingStartedAt, &claim.StaleReclaimed)
+	if err == nil {
+		claim.Claimed = true
+		if err := tx.Commit(ctx); err != nil {
+			return TelegramUpdateClaim{}, err
+		}
+		return claim, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return claim, err
+	}
+
+	err = tx.QueryRow(ctx, `SELECT status, attempt_count, processing_started_at FROM telegram_updates WHERE telegram_update_id=$1 OR (telegram_chat_id=$2 AND telegram_message_id=$3)`, meta.UpdateID, meta.ChatID, meta.MessageID).Scan(&claim.Status, &claim.AttemptCount, &claim.ProcessingStartedAt)
+	if err != nil {
+		return claim, err
+	}
+	return claim, tx.Commit(ctx)
+}
+
+func (s *Store) MarkTelegramUpdateProcessed(ctx context.Context, meta TelegramUpdateMeta, startedAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE telegram_updates SET status='processed', processed_at=now(), last_error=NULL WHERE (telegram_update_id=$1 OR (telegram_chat_id=$3 AND telegram_message_id=$4)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, meta.ChatID, meta.MessageID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("telegram update claim no longer active")
+	}
+	return nil
+}
+
+func (s *Store) MarkTelegramUpdateFailed(ctx context.Context, meta TelegramUpdateMeta, startedAt time.Time, cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE telegram_updates SET status='failed', failed_at=now(), last_error=$3 WHERE (telegram_update_id=$1 OR (telegram_chat_id=$4 AND telegram_message_id=$5)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, msg, meta.ChatID, meta.MessageID)
+	return err
+}
+
+func (s *Store) SaveRawNoteAndMarkTelegramUpdateProcessed(ctx context.Context, userID int64, raw string, meta TelegramUpdateMeta, startedAt time.Time) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	var noteID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text) VALUES ($1,$2) RETURNING id`, userID, raw).Scan(&noteID); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE telegram_updates SET status='processed', processed_at=now(), last_error=NULL WHERE (telegram_update_id=$1 OR (telegram_chat_id=$3 AND telegram_message_id=$4)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, meta.ChatID, meta.MessageID)
+	if err != nil {
+		return 0, err
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, fmt.Errorf("telegram update claim no longer active")
+	}
+	return noteID, tx.Commit(ctx)
+}
+
+func (s *Store) SaveParsedNoteAndMarkTelegramUpdateProcessed(ctx context.Context, userID int64, raw string, parsed models.ParsedNote, meta TelegramUpdateMeta, startedAt time.Time) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	noteID, err := saveParsedNoteTx(ctx, tx, userID, raw, parsed)
+	if err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE telegram_updates SET status='processed', processed_at=now(), last_error=NULL WHERE (telegram_update_id=$1 OR (telegram_chat_id=$3 AND telegram_message_id=$4)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, meta.ChatID, meta.MessageID)
+	if err != nil {
+		return 0, err
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, fmt.Errorf("telegram update claim no longer active")
+	}
+	return noteID, tx.Commit(ctx)
+}
+
+func (s *Store) MarkActionDoneAndMarkTelegramUpdateProcessed(ctx context.Context, userID, actionID int64, meta TelegramUpdateMeta, startedAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE actions SET status='done', completed_at=now() WHERE user_id=$1 AND id=$2 AND status='open'`, userID, actionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("action not found or already done")
+	}
+	tag, err = tx.Exec(ctx, `UPDATE telegram_updates SET status='processed', processed_at=now(), last_error=NULL WHERE (telegram_update_id=$1 OR (telegram_chat_id=$3 AND telegram_message_id=$4)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, meta.ChatID, meta.MessageID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("telegram update claim no longer active")
+	}
+	return tx.Commit(ctx)
+}
+
+func saveParsedNoteTx(ctx context.Context, tx pgx.Tx, userID int64, raw string, parsed models.ParsedNote) (int64, error) {
+	var noteID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text, summary, tags) VALUES ($1,$2,$3,$4) RETURNING id`, userID, raw, parsed.Summary, parsed.Tags).Scan(&noteID); err != nil {
+		return 0, err
+	}
+	personIDs := map[string]int64{}
+	for _, pn := range parsed.PeopleNotes {
+		name := strings.TrimSpace(pn.PersonName)
+		if name == "" {
+			continue
+		}
+		pid, err := upsertPerson(ctx, tx, userID, name)
+		if err != nil {
+			return 0, err
+		}
+		personIDs[NormalizePersonName(name)] = pid
+		if _, err := tx.Exec(ctx, `INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, pid, noteID, emptyTo(pn.Type, "context"), pn.Theme, pn.Text, pn.IncludeInReview); err != nil {
+			return 0, err
+		}
+	}
+	for _, action := range parsed.Actions {
+		title := strings.TrimSpace(action.Title)
+		if title == "" {
+			continue
+		}
+		var linkedPersonID *int64
+		if action.LinkedPersonName != "" {
+			key := NormalizePersonName(action.LinkedPersonName)
+			pid, ok := personIDs[key]
+			var err error
+			if !ok {
+				pid, err = upsertPerson(ctx, tx, userID, action.LinkedPersonName)
+				if err != nil {
+					return 0, err
+				}
+			}
+			linkedPersonID = &pid
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type) VALUES ($1,$2,$3,$4,$5)`, userID, noteID, linkedPersonID, title, action.OutputType); err != nil {
+			return 0, err
+		}
+	}
+	return noteID, nil
 }
