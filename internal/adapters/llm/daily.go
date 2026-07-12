@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/spozhydaiev/lead-log/internal/models"
@@ -27,10 +28,12 @@ func ParseDailyDigestJSON(content string) (models.DailyDigest, error) {
 	if strings.TrimSpace(digest.ShortSummary) == "" {
 		return models.DailyDigest{}, fmt.Errorf("parse daily digest json: short_summary is required")
 	}
-	for i, h := range digest.PeopleHighlights {
+	for i := range digest.PeopleHighlights {
+		h := &digest.PeopleHighlights[i]
 		if strings.TrimSpace(h.PersonName) == "" || strings.TrimSpace(h.Text) == "" {
 			return models.DailyDigest{}, fmt.Errorf("parse daily digest json: people_highlights[%d] requires person_name and text", i)
 		}
+		normalizeDailyPeopleHighlight(i, h)
 		if !allowedDailyHighlightTypes[h.Type] {
 			return models.DailyDigest{}, fmt.Errorf("parse daily digest json: people_highlights[%d] has invalid type %q", i, h.Type)
 		}
@@ -39,4 +42,24 @@ func ParseDailyDigestJSON(content string) (models.DailyDigest, error) {
 		}
 	}
 	return digest, nil
+}
+
+func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight) {
+	originalType := h.Type
+	originalTheme := h.Theme
+	h.Type = strings.TrimSpace(h.Type)
+	h.Theme = strings.TrimSpace(h.Theme)
+
+	themeLooksLikeType := allowedDailyHighlightTypes[h.Theme]
+	if !allowedDailyHighlightTypes[h.Type] && themeLooksLikeType {
+		h.Type = h.Theme
+	}
+
+	if !allowedDailyThemes[h.Theme] {
+		h.Theme = "other"
+	}
+
+	if h.Type != originalType || h.Theme != originalTheme {
+		log.Printf("daily digest normalized people_highlights[%d] type=%q->%q theme=%q->%q", index, originalType, h.Type, originalTheme, h.Theme)
+	}
 }
