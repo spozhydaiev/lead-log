@@ -24,10 +24,11 @@ type Service struct {
 	llm           llm.ClientLLM
 	dailyLocation *time.Location
 	logger        *slog.Logger
+	language      models.ResponseLanguage
 }
 
 func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
-	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default()}
+	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default(), language: models.LanguageEnglish}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -40,6 +41,14 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Service) {
 		if logger != nil {
 			s.logger = logger
+		}
+	}
+}
+
+func WithResponseLanguage(language models.ResponseLanguage) Option {
+	return func(s *Service) {
+		if language != "" {
+			s.language = language
 		}
 	}
 }
@@ -62,7 +71,7 @@ func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (st
 		return "", fmt.Errorf("capture.save_raw_note: %w", err)
 	}
 	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "user_id", userID, "note_id", noteID, "note_length", len(raw))
-	return "Збережено в нотатки за сьогодні.", nil
+	return s.language.CommonMessages().SavedRaw, nil
 }
 
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
@@ -80,7 +89,7 @@ func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string
 		return "", fmt.Errorf("now.persistence: %w", err)
 	}
 	s.logger.Info("persistence completed", "operation", "now.persistence", "user_id", userID, "note_id", noteID)
-	return formatParsedNote(noteID, parsed), nil
+	return formatParsedNote(noteID, parsed, s.language), nil
 }
 
 func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error) {
@@ -89,10 +98,10 @@ func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error)
 		return "", err
 	}
 	if len(actions) == 0 {
-		return "Відкритих дій немає 🎉", nil
+		return s.language.CommonMessages().NoOpenActions, nil
 	}
 	var b strings.Builder
-	b.WriteString("Відкриті дії:\n")
+	b.WriteString(s.language.CommonMessages().OpenActionsHeader + "\n")
 	for _, a := range actions {
 		person := ""
 		if a.PersonName != nil {
@@ -110,12 +119,12 @@ func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error)
 func (s *Service) Done(ctx context.Context, userID int64, arg string) (string, error) {
 	id, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
 	if err != nil {
-		return "Використання: /done <action_id>", nil
+		return s.language.CommonMessages().DoneUsage, nil
 	}
 	if err := s.store.MarkActionDone(ctx, userID, id); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Позначено дію %d як виконану.", id), nil
+	return fmt.Sprintf(s.language.CommonMessages().DoneMarked, id), nil
 }
 
 func countParsedPeople(p models.ParsedNote) int {
@@ -160,10 +169,10 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 	}
 	if strings.TrimSpace(source) == "" {
 		log.Info("daily source loaded", "note_count", 0)
-		return "За сьогодні нотаток немає.", nil
+		return s.language.CommonMessages().NoNotesToday, nil
 	}
 
-	scopeKey := startOfDay.Format("2006-01-02")
+	scopeKey := scopedCacheKey(startOfDay.Format("2006-01-02"), s.language)
 	sourceHash := utils.HashStrings(source)
 	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
 	log.Info("daily source loaded")
@@ -176,7 +185,7 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		}
 		if cached != nil {
 			log.Info("cache hit", "cache_hit", true)
-			return cached.ResponseText + "\n\n_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", nil
+			return cached.ResponseText + "\n\n" + s.language.CommonMessages().DailyCachedNotice, nil
 		}
 	}
 	log.Info("cache miss", "cache_hit", false)
@@ -188,7 +197,7 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 		return "", fmt.Errorf("daily.llm_request: %w", err)
 	}
 	log.Info("LLM call completed", "operation", "daily.llm_request")
-	responseText := FormatDailyDigest(digest)
+	responseText := FormatDailyDigestForLanguage(digest, s.language)
 	if strings.TrimSpace(responseText) == "" {
 		err := fmt.Errorf("empty formatted daily digest")
 		log.Error("daily failed", "failure_stage", "formatting", "operation", "daily.formatting", "error", err)
@@ -222,11 +231,11 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 	}
 	if strings.TrimSpace(source) == "" {
 		log.Info("weekly source loaded", "note_count", 0)
-		return "No notes for the last 7 days.", nil
+		return s.language.CommonMessages().NoNotesLast7Days, nil
 	}
 
 	year, week := now.ISOWeek()
-	scopeKey := fmt.Sprintf("%d-W%02d", year, week)
+	scopeKey := scopedCacheKey(fmt.Sprintf("%d-W%02d", year, week), s.language)
 	sourceHash := utils.HashStrings(source)
 	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
 	log.Info("weekly source loaded")
@@ -239,7 +248,7 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 		}
 		if cached != nil {
 			log.Info("cache hit", "cache_hit", true)
-			return cached.ResponseText + "\n\n_cached. Use /weekly --refresh to regenerate._", nil
+			return cached.ResponseText + "\n\n" + s.language.CommonMessages().WeeklyCachedNotice, nil
 		}
 	}
 	log.Info("cache miss", "cache_hit", false)
@@ -259,14 +268,15 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 	return response, nil
 }
 
-func formatParsedNote(noteID int64, p models.ParsedNote) string {
+func formatParsedNote(noteID int64, p models.ParsedNote, language models.ResponseLanguage) string {
+	labels := language.NowLabels()
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Saved note #%d\n\n", noteID))
+	b.WriteString(fmt.Sprintf("%s #%d\n\n", labels.SavedNote, noteID))
 	if p.Summary != "" {
-		b.WriteString("Summary:\n" + p.Summary + "\n\n")
+		b.WriteString(labels.Summary + ":\n" + p.Summary + "\n\n")
 	}
 	if len(p.Actions) > 0 {
-		b.WriteString("Actions:\n")
+		b.WriteString(labels.Actions + ":\n")
 		for i, a := range p.Actions {
 			b.WriteString(fmt.Sprintf("%d. %s", i+1, a.Title))
 			if a.LinkedPersonName != "" {
@@ -280,17 +290,25 @@ func formatParsedNote(noteID int64, p models.ParsedNote) string {
 		b.WriteString("\n")
 	}
 	if len(p.PeopleNotes) > 0 {
-		b.WriteString("People notes:\n")
+		b.WriteString(labels.PeopleNotes + ":\n")
 		for _, pn := range p.PeopleNotes {
 			b.WriteString(fmt.Sprintf("- %s: %s / %s — %s\n", pn.PersonName, pn.Type, pn.Theme, pn.Text))
 		}
 		b.WriteString("\n")
 	}
 	if len(p.SuggestedQuestions) > 0 {
-		b.WriteString("Questions:\n")
+		b.WriteString(labels.Questions + ":\n")
 		for _, q := range p.SuggestedQuestions {
 			b.WriteString("- " + q + "\n")
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func scopedCacheKey(base string, language models.ResponseLanguage) string {
+	return base + ":" + string(language)
+}
+
+func (s *Service) ResponseMessages() models.CommonMessages {
+	return s.language.CommonMessages()
 }

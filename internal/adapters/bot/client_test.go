@@ -3,6 +3,8 @@ package bot
 import (
 	"strings"
 	"testing"
+
+	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -32,22 +34,22 @@ func TestSplitCommand(t *testing.T) {
 }
 
 func TestHelpTextDocumentsMVPCommands(t *testing.T) {
-	help := helpText()
+	help := models.LanguageEnglish.CommonMessages().HelpText
 	for _, want := range []string{
-		"/note <текст> — швидко зберегти сиру нотатку без AI-обробки",
-		"/now <текст> — зберегти й одразу структурувати нотатку",
-		"/daily --refresh — згенерувати денний дайджест заново",
-		"/weekly --refresh — згенерувати тижневий дайджест заново",
-		"звичайний текст без /note",
+		"/note <text> — quickly save a raw note without AI processing",
+		"/now <text> — save and immediately structure a note",
+		"/daily --refresh — regenerate the daily digest",
+		"/weekly --refresh — regenerate the weekly digest",
+		"regular text without /note",
 	} {
 		if !strings.Contains(help, want) {
-			t.Fatalf("helpText() does not contain %q\n%s", want, help)
+			t.Fatalf("help text does not contain %q\n%s", want, help)
 		}
 	}
 
 	for _, removed := range []string{"/person", "/agenda", "/review", "/alias", "/merge", "/ticket"} {
 		if strings.Contains(help, removed) {
-			t.Fatalf("helpText() still exposes %q\n%s", removed, help)
+			t.Fatalf("help text still exposes %q\n%s", removed, help)
 		}
 	}
 }

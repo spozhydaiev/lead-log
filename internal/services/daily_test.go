@@ -19,7 +19,7 @@ func TestFormatDailyDigest(t *testing.T) {
 		SuggestedNextSteps: []models.DailyTextItem{{Text: "Написати команді апдейт.", SourceNoteIDs: []int64{11}}},
 		UnclearItems:       []models.DailyTextItem{{Text: "Немає власника для багу.", SourceNoteIDs: []int64{12}}},
 	})
-	for _, want := range []string{"Коротко", "Open loops", "Ticket candidates", "People highlights", "Decisions / agreements", "Suggested next steps", "Unclear items", "джерела: #7"} {
+	for _, want := range []string{"Brief", "Open loops", "Ticket candidates", "People highlights", "Decisions / agreements", "Suggested next steps", "Unclear items", "sources: #7"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("formatted digest missing %q:\n%s", want, out)
 		}

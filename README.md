@@ -38,6 +38,7 @@ The app reads configuration from environment variables. A local `.env` file is a
 
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
+- `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
 - `ALLOWED_TELEGRAM_USER_IDS` — comma-separated Telegram user IDs allowed to use the bot. If empty, all users are allowed.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `18:00`.
@@ -46,11 +47,23 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `LOG_FORMAT` — structured log output format: `text` or `json`. Defaults to `text`.
 
 
+### Response language
+
+Set `RESPONSE_LANGUAGE` to choose the language used for user-facing summaries, headings, action text, warnings, help text, empty-state messages, cache notices, and scheduled daily summaries. English is the default when the variable is omitted.
+
+Supported values:
+
+- `en` — English
+- `uk` — Ukrainian
+- `pl` — Polish
+
+Every LLM prompt explicitly asks the model to return user-facing text in the configured language, preserve person names, and keep JSON field names exactly as defined by the schema. Cache entries are language-scoped, so changing `RESPONSE_LANGUAGE` does not reuse a summary generated in another language; `/daily --refresh` and `/weekly --refresh` still force regeneration.
+
 ## Logging
 
 LeadLog uses Go's standard `log/slog` package for structured development logs. Configure logs with `LOG_LEVEL` and `LOG_FORMAT`; use `LOG_FORMAT=json` when shipping logs to a collector.
 
-Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
+Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, response language, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
 
 Privacy rules for logs:
 - Telegram user IDs may be logged for development diagnostics.
