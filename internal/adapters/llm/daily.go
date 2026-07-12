@@ -3,7 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/spozhydaiev/lead-log/internal/models"
@@ -21,19 +21,28 @@ var allowedDailyThemes = map[string]bool{
 }
 
 func ParseDailyDigestJSON(content string) (models.DailyDigest, error) {
+	return ParseDailyDigestJSONWithLogger(content, slog.Default())
+}
+
+func ParseDailyDigestJSONWithLogger(content string, logger *slog.Logger) (models.DailyDigest, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("JSON parse started", "operation", "daily.parse_json", "response_size", len(content))
 	var digest models.DailyDigest
 	if err := json.Unmarshal([]byte(content), &digest); err != nil {
-		return models.DailyDigest{}, fmt.Errorf("parse daily digest json: %w; content=%s", err, content)
+		logger.Warn("JSON parse failure", "operation", "daily.parse_json", "response_size", len(content), "error", err)
+		return models.DailyDigest{}, fmt.Errorf("parse daily digest json: %w", err)
 	}
 
 	digest.ShortSummary = strings.TrimSpace(digest.ShortSummary)
-	digest.OpenLoops = validDailyOpenLoops(digest.OpenLoops)
-	digest.TicketCandidates = validDailyTicketCandidates(digest.TicketCandidates)
-	digest.Decisions = validDailyTextItems("decisions", digest.Decisions)
-	digest.SuggestedNextSteps = validDailyTextItems("suggested_next_steps", digest.SuggestedNextSteps)
-	digest.UnclearItems = validDailyTextItems("unclear_items", digest.UnclearItems)
+	digest.OpenLoops = validDailyOpenLoops(digest.OpenLoops, logger)
+	digest.TicketCandidates = validDailyTicketCandidates(digest.TicketCandidates, logger)
+	digest.Decisions = validDailyTextItems("decisions", digest.Decisions, logger)
+	digest.SuggestedNextSteps = validDailyTextItems("suggested_next_steps", digest.SuggestedNextSteps, logger)
+	digest.UnclearItems = validDailyTextItems("unclear_items", digest.UnclearItems, logger)
 
-	peopleHighlights, err := validDailyPeopleHighlights(digest.PeopleHighlights)
+	peopleHighlights, err := validDailyPeopleHighlights(digest.PeopleHighlights, logger)
 	if err != nil {
 		return models.DailyDigest{}, err
 	}
@@ -43,10 +52,11 @@ func ParseDailyDigestJSON(content string) (models.DailyDigest, error) {
 		return models.DailyDigest{}, fmt.Errorf("parse daily digest json: digest has no summary or valid sections")
 	}
 
+	logger.Info("JSON parse completed", "operation", "daily.parse_json", "open_loops", len(digest.OpenLoops), "ticket_candidates", len(digest.TicketCandidates), "people_highlights", len(digest.PeopleHighlights), "decisions", len(digest.Decisions), "suggested_next_steps", len(digest.SuggestedNextSteps), "unclear_items", len(digest.UnclearItems))
 	return digest, nil
 }
 
-func validDailyOpenLoops(items []models.DailyOpenLoop) []models.DailyOpenLoop {
+func validDailyOpenLoops(items []models.DailyOpenLoop, logger *slog.Logger) []models.DailyOpenLoop {
 	valid := make([]models.DailyOpenLoop, 0, len(items))
 	for i, item := range items {
 		item.Title = strings.TrimSpace(item.Title)
@@ -59,7 +69,7 @@ func validDailyOpenLoops(items []models.DailyOpenLoop) []models.DailyOpenLoop {
 			item.DueHint = &dueHint
 		}
 		if item.Title == "" {
-			log.Printf("daily digest skipped open_loops[%d]: title is required", i)
+			logger.Warn("invalid optional item skipped", "operation", "daily.parse_json", "section", "open_loops", "item_index", i, "reason", "title is required")
 			continue
 		}
 		valid = append(valid, item)
@@ -67,7 +77,7 @@ func validDailyOpenLoops(items []models.DailyOpenLoop) []models.DailyOpenLoop {
 	return valid
 }
 
-func validDailyTicketCandidates(items []models.DailyTicketCandidate) []models.DailyTicketCandidate {
+func validDailyTicketCandidates(items []models.DailyTicketCandidate, logger *slog.Logger) []models.DailyTicketCandidate {
 	valid := make([]models.DailyTicketCandidate, 0, len(items))
 	for i, item := range items {
 		item.Title = strings.TrimSpace(item.Title)
@@ -77,7 +87,7 @@ func validDailyTicketCandidates(items []models.DailyTicketCandidate) []models.Da
 			item.Owner = &owner
 		}
 		if item.Title == "" {
-			log.Printf("daily digest skipped ticket_candidates[%d]: title is required", i)
+			logger.Warn("invalid optional item skipped", "operation", "daily.parse_json", "section", "ticket_candidates", "item_index", i, "reason", "title is required")
 			continue
 		}
 		valid = append(valid, item)
@@ -85,17 +95,17 @@ func validDailyTicketCandidates(items []models.DailyTicketCandidate) []models.Da
 	return valid
 }
 
-func validDailyPeopleHighlights(items []models.DailyPeopleHighlight) ([]models.DailyPeopleHighlight, error) {
+func validDailyPeopleHighlights(items []models.DailyPeopleHighlight, logger *slog.Logger) ([]models.DailyPeopleHighlight, error) {
 	valid := make([]models.DailyPeopleHighlight, 0, len(items))
 	for i := range items {
 		h := items[i]
 		h.PersonName = strings.TrimSpace(h.PersonName)
 		h.Text = strings.TrimSpace(h.Text)
 		if h.PersonName == "" || h.Text == "" {
-			log.Printf("daily digest skipped people_highlights[%d]: person_name and text are required", i)
+			logger.Warn("invalid optional item skipped", "operation", "daily.parse_json", "section", "people_highlights", "item_index", i, "reason", "person_name and text are required")
 			continue
 		}
-		normalizeDailyPeopleHighlight(i, &h)
+		normalizeDailyPeopleHighlight(i, &h, logger)
 		if !allowedDailyHighlightTypes[h.Type] {
 			return nil, fmt.Errorf("parse daily digest json: people_highlights[%d] has invalid type %q", i, h.Type)
 		}
@@ -107,12 +117,12 @@ func validDailyPeopleHighlights(items []models.DailyPeopleHighlight) ([]models.D
 	return valid, nil
 }
 
-func validDailyTextItems(section string, items []models.DailyTextItem) []models.DailyTextItem {
+func validDailyTextItems(section string, items []models.DailyTextItem, logger *slog.Logger) []models.DailyTextItem {
 	valid := make([]models.DailyTextItem, 0, len(items))
 	for i, item := range items {
 		item.Text = strings.TrimSpace(item.Text)
 		if item.Text == "" {
-			log.Printf("daily digest skipped %s[%d]: text is required", section, i)
+			logger.Warn("invalid optional item skipped", "operation", "daily.parse_json", "section", section, "item_index", i, "reason", "text is required")
 			continue
 		}
 		valid = append(valid, item)
@@ -130,7 +140,7 @@ func unusableDailyDigest(d models.DailyDigest) bool {
 		len(d.UnclearItems) == 0
 }
 
-func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight) {
+func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight, logger *slog.Logger) {
 	originalType := h.Type
 	originalTheme := h.Theme
 	h.Type = strings.TrimSpace(h.Type)
@@ -146,6 +156,6 @@ func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight) {
 	}
 
 	if h.Type != originalType || h.Theme != originalTheme {
-		log.Printf("daily digest normalized people_highlights[%d] type=%q->%q theme=%q->%q", index, originalType, h.Type, originalTheme, h.Theme)
+		logger.Warn("invalid optional item normalized", "operation", "daily.parse_json", "section", "people_highlights", "item_index", index, "reason", "invalid type/theme normalized")
 	}
 }

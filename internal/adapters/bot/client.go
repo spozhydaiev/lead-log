@@ -2,7 +2,7 @@ package bot
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -13,21 +13,26 @@ import (
 )
 
 type Bot struct {
-	api *tgbotapi.BotAPI
-	cfg config.Config
-	svc *svc.Service
+	api    *tgbotapi.BotAPI
+	cfg    config.Config
+	svc    *svc.Service
+	logger *slog.Logger
 }
 
-func New(cfg config.Config, svc *svc.Service) (*Bot, error) {
+func New(cfg config.Config, svc *svc.Service, logger ...*slog.Logger) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
 		return nil, err
 	}
-	return &Bot{api: api, cfg: cfg, svc: svc}, nil
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+	return &Bot{api: api, cfg: cfg, svc: svc, logger: l}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	log.Printf("Authorized as @%s", b.api.Self.UserName)
+	b.logger.Info("bot polling started", "operation", "bot.polling", "bot_username", b.api.Self.UserName)
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := b.api.GetUpdatesChan(u)
@@ -35,8 +40,13 @@ func (b *Bot) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			b.logger.Info("bot polling stopped", "operation", "bot.polling")
 			return ctx.Err()
-		case update := <-updates:
+		case update, ok := <-updates:
+			if !ok {
+				b.logger.Warn("Telegram update channel closed", "operation", "bot.polling")
+				return nil
+			}
 			if update.Message == nil || update.Message.From == nil {
 				continue
 			}
@@ -54,18 +64,28 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	userID, err := b.svc.EnsureUser(ctx, telegramUserID, msg.From.UserName)
 	if err != nil {
-		log.Printf("ensure user: %v", err)
+		b.logger.Error("command failed", "operation", "bot.ensure_user", "telegram_user_id", telegramUserID, "error", err)
 		b.reply(msg.Chat.ID, "Failed to initialize user.")
 		return
 	}
 
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
+		b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", "unsupported")
 		b.reply(msg.Chat.ID, "Send text note or use /note <text>.")
 		return
 	}
 
 	cmd, arg := splitCommand(text)
+	messageType := "plain_text"
+	if cmd != "" {
+		messageType = "command"
+	}
+	commandName := cmd
+	if commandName == "" {
+		commandName = "plain_text"
+	}
+	b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", messageType, "command", commandName, "note_length", len(arg))
 	var response string
 	switch cmd {
 	case "/start", "/help":
@@ -87,11 +107,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		response, err = b.svc.CaptureNote(ctx, userID, text)
 	}
 	if err != nil {
-		log.Printf("handle command %s: %v", cmd, err)
+		b.logger.Error("command failed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName, "error", err)
 		b.reply(msg.Chat.ID, "Error: "+err.Error())
 		return
 	}
 	b.reply(msg.Chat.ID, response)
+	b.logger.Info("command completed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName)
 }
 
 func splitCommand(text string) (string, string) {
@@ -116,7 +137,7 @@ func (b *Bot) SendMessage(chatID int64, text string) error {
 
 func (b *Bot) reply(chatID int64, text string) {
 	if err := b.send(chatID, text); err != nil {
-		log.Printf("send message: %v", err)
+		b.logger.Error("message send failed", "operation", "bot.send_message", "chat_id", chatID, "error", err)
 	}
 }
 

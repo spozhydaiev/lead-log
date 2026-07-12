@@ -20,6 +20,8 @@ type Config struct {
 	DailySummaryTime       string
 	DailySummaryTimezone   string
 	DailySummaryLocation   *time.Location
+	LogLevel               string
+	LogFormat              string
 }
 
 func Load() Config {
@@ -45,6 +47,8 @@ func Load() Config {
 		DailySummaryTime:       dailyTime,
 		DailySummaryTimezone:   dailyTimezone,
 		DailySummaryLocation:   dailyLocation,
+		LogLevel:               envOr("LOG_LEVEL", "info"),
+		LogFormat:              envOr("LOG_FORMAT", "text"),
 	}
 }
 

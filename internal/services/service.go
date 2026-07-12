@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/logging"
 
 	"github.com/spozhydaiev/lead-log/internal/models"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
@@ -21,10 +23,11 @@ type Service struct {
 	store         *store.Store
 	llm           llm.ClientLLM
 	dailyLocation *time.Location
+	logger        *slog.Logger
 }
 
 func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
-	s := &Service{store: store, llm: llm, dailyLocation: time.Local}
+	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default()}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -32,6 +35,14 @@ func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
 }
 
 type Option func(*Service)
+
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Service) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
 
 func WithDailyLocation(loc *time.Location) Option {
 	return func(s *Service) {
@@ -46,21 +57,29 @@ func (s *Service) EnsureUser(ctx context.Context, telegramUserID int64, username
 }
 
 func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
-	if _, err := s.store.SaveRawNote(ctx, userID, raw); err != nil {
-		return "", err
+	noteID, err := s.store.SaveRawNote(ctx, userID, raw)
+	if err != nil {
+		return "", fmt.Errorf("capture.save_raw_note: %w", err)
 	}
+	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "user_id", userID, "note_id", noteID, "note_length", len(raw))
 	return "Збережено в нотатки за сьогодні.", nil
 }
 
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
+	s.logger.Info("immediate processing started", "operation", "now.process", "user_id", userID, "note_length", len(raw))
+	s.logger.Info("LLM call started", "operation", "parse_note", "user_id", userID)
 	parsed, err := s.llm.ParseManagerNote(ctx, raw)
 	if err != nil {
-		return "", err
+		s.logger.Error("command failed", "operation", "parse_note", "user_id", userID, "error", err)
+		return "", fmt.Errorf("now.llm_request: %w", err)
 	}
+	s.logger.Info("LLM call completed", "operation", "parse_note", "user_id", userID, "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
 	noteID, err := s.store.SaveParsedNote(ctx, userID, raw, parsed)
 	if err != nil {
-		return "", err
+		s.logger.Error("persistence failed", "operation", "now.persistence", "user_id", userID, "error", err)
+		return "", fmt.Errorf("now.persistence: %w", err)
 	}
+	s.logger.Info("persistence completed", "operation", "now.persistence", "user_id", userID, "note_id", noteID)
 	return formatParsedNote(noteID, parsed), nil
 }
 
@@ -99,6 +118,26 @@ func (s *Service) Done(ctx context.Context, userID int64, arg string) (string, e
 	return fmt.Sprintf("Позначено дію %d як виконану.", id), nil
 }
 
+func countParsedPeople(p models.ParsedNote) int {
+	seen := map[string]bool{}
+	for _, pn := range p.PeopleNotes {
+		name := strings.TrimSpace(pn.PersonName)
+		if name != "" {
+			seen[name] = true
+		}
+	}
+	for _, a := range p.Actions {
+		name := strings.TrimSpace(a.LinkedPersonName)
+		if name != "" {
+			seen[name] = true
+		}
+	}
+	return len(seen)
+}
+
+func countSourceNotes(source string) int {
+	return strings.Count(source, "Note #")
+}
 func (s *Service) Daily(ctx context.Context, userID int64, refresh bool) (string, error) {
 	return s.DailyAt(ctx, userID, time.Now(), refresh)
 }
@@ -111,115 +150,112 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 	localNow := now.In(loc)
 	startOfDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
 	endOfDay := startOfDay.AddDate(0, 0, 1)
+	log := s.logger.With("operation", "daily", "user_id", userID, "period_start", startOfDay.Format(time.RFC3339), "period_end", endOfDay.Format(time.RFC3339), "timezone", loc.String())
+	log.Info("daily command started", "resolved_timezone", loc.String())
 
 	source, err := s.store.RecentDailySource(ctx, userID, startOfDay, endOfDay)
 	if err != nil {
-		return "", err
+		log.Error("daily failed", "failure_stage", "source loading", "operation", "daily.load_source", "error", err)
+		return "", fmt.Errorf("daily.load_source: %w", err)
 	}
 	if strings.TrimSpace(source) == "" {
+		log.Info("daily source loaded", "note_count", 0)
 		return "За сьогодні нотаток немає.", nil
 	}
 
 	scopeKey := startOfDay.Format("2006-01-02")
 	sourceHash := utils.HashStrings(source)
+	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
+	log.Info("daily source loaded")
 
 	if !refresh {
-		cached, err := s.store.GetCachedAgentResponse(
-			ctx,
-			userID,
-			"daily",
-			scopeKey,
-			sourceHash,
-			PromptVersion,
-		)
+		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "daily", scopeKey, sourceHash, PromptVersion)
 		if err != nil {
-			return "", err
+			log.Error("daily failed", "failure_stage", "cache lookup", "operation", "daily.cache_lookup", "error", err)
+			return "", fmt.Errorf("daily.cache_lookup: %w", err)
 		}
 		if cached != nil {
+			log.Info("cache hit", "cache_hit", true)
 			return cached.ResponseText + "\n\n_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", nil
 		}
 	}
+	log.Info("cache miss", "cache_hit", false)
 
+	log.Info("LLM call started", "operation", "daily.llm_request")
 	digest, err := s.llm.ProcessDaily(ctx, source)
 	if err != nil {
+		log.Error("daily failed", "failure_stage", "LLM request", "operation", "daily.llm_request", "error", err)
+		return "", fmt.Errorf("daily.llm_request: %w", err)
+	}
+	log.Info("LLM call completed", "operation", "daily.llm_request")
+	responseText := FormatDailyDigest(digest)
+	if strings.TrimSpace(responseText) == "" {
+		err := fmt.Errorf("empty formatted daily digest")
+		log.Error("daily failed", "failure_stage", "formatting", "operation", "daily.formatting", "error", err)
 		return "", err
 	}
-	responseText := FormatDailyDigest(digest)
 	responseJSON, err := json.Marshal(digest)
 	if err != nil {
-		return "", err
+		log.Error("daily failed", "failure_stage", "JSON parsing", "operation", "daily.parse_json", "error", err)
+		return "", fmt.Errorf("daily.parse_json: %w", err)
 	}
 
-	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{
-		UserID:        userID,
-		Kind:          "daily",
-		ScopeKey:      scopeKey,
-		PeriodStart:   &startOfDay,
-		PeriodEnd:     &endOfDay,
-		SourceHash:    sourceHash,
-		PromptVersion: PromptVersion,
-		Model:         s.llm.Model(),
-		ResponseText:  responseText,
-		ResponseJSON:  string(responseJSON),
-	}); err != nil {
-		return "", err
+	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "daily", ScopeKey: scopeKey, PeriodStart: &startOfDay, PeriodEnd: &endOfDay, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: responseText, ResponseJSON: string(responseJSON)}); err != nil {
+		log.Error("daily failed", "failure_stage", "cache save", "operation", "daily.cache_save", "error", err)
+		return "", fmt.Errorf("daily.cache_save: %w", err)
 	}
-
+	log.Info("digest cached", "operation", "daily.cache_save")
+	log.Info("formatted response sent", "operation", "daily.formatting", "response_length", len(responseText))
 	return responseText, nil
 }
 
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
 	now := time.Now()
 	start := now.AddDate(0, 0, -7)
+	log := s.logger.With("operation", "weekly", "user_id", userID, "period_start", start.Format(time.RFC3339), "period_end", now.Format(time.RFC3339))
+	log.Info("weekly command started")
 
 	source, err := s.store.RecentWeeklySource(ctx, userID, start)
 	if err != nil {
-		return "", err
+		log.Error("weekly failed", "failure_stage", "source loading", "operation", "weekly.load_source", "error", err)
+		return "", fmt.Errorf("weekly.load_source: %w", err)
 	}
 	if strings.TrimSpace(source) == "" {
+		log.Info("weekly source loaded", "note_count", 0)
 		return "No notes for the last 7 days.", nil
 	}
 
 	year, week := now.ISOWeek()
 	scopeKey := fmt.Sprintf("%d-W%02d", year, week)
 	sourceHash := utils.HashStrings(source)
+	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", countSourceNotes(source))
+	log.Info("weekly source loaded")
 
 	if !refresh {
-		cached, err := s.store.GetCachedAgentResponse(
-			ctx,
-			userID,
-			"weekly",
-			scopeKey,
-			sourceHash,
-			PromptVersion,
-		)
+		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "weekly", scopeKey, sourceHash, PromptVersion)
 		if err != nil {
-			return "", err
+			log.Error("weekly failed", "failure_stage", "cache lookup", "operation", "weekly.cache_lookup", "error", err)
+			return "", fmt.Errorf("weekly.cache_lookup: %w", err)
 		}
 		if cached != nil {
+			log.Info("cache hit", "cache_hit", true)
 			return cached.ResponseText + "\n\n_cached. Use /weekly --refresh to regenerate._", nil
 		}
 	}
-
+	log.Info("cache miss", "cache_hit", false)
+	log.Info("LLM call started", "operation", "weekly.llm_request")
 	response, err := s.llm.SummarizeWeekly(ctx, source)
 	if err != nil {
-		return "", err
+		log.Error("weekly failed", "failure_stage", "LLM request", "operation", "weekly.llm_request", "error", err)
+		return "", fmt.Errorf("weekly.llm_request: %w", err)
 	}
+	log.Info("LLM call completed", "operation", "weekly.llm_request")
 
-	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{
-		UserID:        userID,
-		Kind:          "weekly",
-		ScopeKey:      scopeKey,
-		PeriodStart:   &start,
-		PeriodEnd:     &now,
-		SourceHash:    sourceHash,
-		PromptVersion: PromptVersion,
-		Model:         s.llm.Model(),
-		ResponseText:  response,
-	}); err != nil {
-		return "", err
+	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &now, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: response}); err != nil {
+		log.Error("weekly failed", "failure_stage", "cache save", "operation", "weekly.cache_save", "error", err)
+		return "", fmt.Errorf("weekly.cache_save: %w", err)
 	}
-
+	log.Info("cache save completed", "operation", "weekly.cache_save")
 	return response, nil
 }
 
