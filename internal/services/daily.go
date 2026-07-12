@@ -1,7 +1,6 @@
 package services
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -96,64 +95,4 @@ func writeTextItems(b *strings.Builder, title string, items []models.DailyTextIt
 		b.WriteString("- " + text + refs(item.SourceNoteIDs) + "\n")
 	}
 	b.WriteString("\n")
-}
-
-func dailyDigestToParsedNote(d models.DailyDigest) models.ParsedNote {
-	p := models.ParsedNote{Summary: d.ShortSummary}
-	people := map[string]bool{}
-	for _, l := range d.OpenLoops {
-		if strings.TrimSpace(l.Title) == "" {
-			continue
-		}
-		a := models.ParsedAction{Title: strings.TrimSpace(l.Title), OutputType: "reminder", SourceNoteIDs: l.SourceNoteIDs}
-		if l.Owner != nil {
-			a.LinkedPersonName = strings.TrimSpace(*l.Owner)
-			if a.LinkedPersonName != "" {
-				people[a.LinkedPersonName] = true
-			}
-		}
-		p.Actions = append(p.Actions, a)
-	}
-	for _, t := range d.TicketCandidates {
-		if strings.TrimSpace(t.Title) == "" {
-			continue
-		}
-		a := models.ParsedAction{Title: strings.TrimSpace(t.Title), OutputType: "ticket", SourceNoteIDs: t.SourceNoteIDs}
-		if t.Owner != nil {
-			a.LinkedPersonName = strings.TrimSpace(*t.Owner)
-			if a.LinkedPersonName != "" {
-				people[a.LinkedPersonName] = true
-			}
-		}
-		p.Actions = append(p.Actions, a)
-		p.TicketDrafts = append(p.TicketDrafts, models.TicketDraft{Title: strings.TrimSpace(t.Title), Context: strings.TrimSpace(t.Context)})
-	}
-	for _, h := range d.PeopleHighlights {
-		if strings.TrimSpace(h.PersonName) == "" || strings.TrimSpace(h.Text) == "" {
-			continue
-		}
-		people[strings.TrimSpace(h.PersonName)] = true
-		p.PeopleNotes = append(p.PeopleNotes, models.ParsedPeopleNote{PersonName: strings.TrimSpace(h.PersonName), Type: h.Type, Theme: h.Theme, Text: strings.TrimSpace(h.Text), IncludeInReview: true, SourceNoteIDs: h.SourceNoteIDs})
-	}
-	for name := range people {
-		p.PeopleMentioned = append(p.PeopleMentioned, name)
-	}
-	return p
-}
-
-type legacyDailyProcessingResult struct {
-	Structured models.ParsedNote `json:"structured"`
-}
-
-func cachedDailyStructured(responseJSON string) (models.ParsedNote, bool, error) {
-	var digest models.DailyDigest
-	if err := json.Unmarshal([]byte(responseJSON), &digest); err == nil && strings.TrimSpace(digest.ShortSummary) != "" {
-		return dailyDigestToParsedNote(digest), true, nil
-	}
-
-	var legacy legacyDailyProcessingResult
-	if err := json.Unmarshal([]byte(responseJSON), &legacy); err != nil {
-		return models.ParsedNote{}, false, err
-	}
-	return legacy.Structured, true, nil
 }

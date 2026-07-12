@@ -406,17 +406,6 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 			return "", err
 		}
 		if cached != nil {
-			if strings.TrimSpace(cached.ResponseJSON) != "" {
-				parsed, ok, err := cachedDailyStructured(cached.ResponseJSON)
-				if err != nil {
-					return "", err
-				}
-				if ok {
-					if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, scopeKey, parsed); err != nil {
-						return "", err
-					}
-				}
-			}
 			return cached.ResponseText + "\n\n_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", nil
 		}
 	}
@@ -428,10 +417,6 @@ func (s *Service) DailyAt(ctx context.Context, userID int64, now time.Time, refr
 	responseText := FormatDailyDigest(digest)
 	responseJSON, err := json.Marshal(digest)
 	if err != nil {
-		return "", err
-	}
-
-	if err := s.store.PersistDailyStructured(ctx, userID, startOfDay, endOfDay, scopeKey, dailyDigestToParsedNote(digest)); err != nil {
 		return "", err
 	}
 

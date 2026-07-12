@@ -95,7 +95,7 @@ There is no separate migration command at the moment; migrations run automatical
 
 ## Scheduled daily summaries
 
-Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily summary automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 18:00 in `Europe/Warsaw`. The scheduler reuses the same `Service.Daily` flow as `/daily`, including extraction of structured actions and people notes from raw notes, and records completed sends so a restart around the scheduled time does not send the same user the same day twice.
+Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily summary automatically to every user listed in `ALLOWED_TELEGRAM_USER_IDS`. The default schedule is 18:00 in `Europe/Warsaw`. The scheduler reuses the same read-only `Service.Daily` flow as `/daily`: it generates and caches the digest from raw notes, but does not create actions or people notes. It records completed sends so a restart around the scheduled time does not send the same user the same day twice.
 
 ## Bot commands
 
@@ -103,7 +103,7 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 - `/note <text>` — save a raw manager note without immediate AI processing.
 - Plain text — save a raw manager note without typing `/note` and without immediate AI processing.
 - `/now <text>` — save and immediately structure a manager note through the LLM parsing flow.
-- `/open` — show open loops that exist from `/now` or daily structured processing.
+- `/open` — show open loops created by `/now` or other explicit processing commands.
 - `/done <action_id>` — mark an open loop as done.
 - `/people` — list people and configured aliases.
 - `/alias <alias> = <canonical_name>` — add a normalized lookup alias for a canonical person. For example, `/alias Andrii = Андрій`.
@@ -113,7 +113,7 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 - `/agenda <name>` — generate a concise Ukrainian 1:1 agenda from the person’s existing notes and open actions for the last 90 days. Aliases resolve to the canonical person.
 - `/agenda <name> --refresh` — regenerate the 1:1 agenda instead of using cache without creating new actions or people notes.
 - `/ticket <context>` — generate a Jira-style ticket draft.
-- `/daily` — generate today’s manager digest and persist extracted actions and people notes idempotently.
-- `/daily --refresh` — regenerate today’s digest instead of using cache while avoiding duplicate persisted actions and people notes.
+- `/daily` — generate today’s manager digest from raw notes and cache the response without creating actions or people notes.
+- `/daily --refresh` — regenerate today’s digest/cache without creating actions or people notes.
 - `/weekly` — generate a digest for the last 7 days.
 - `/weekly --refresh` — regenerate the weekly digest instead of using cache.

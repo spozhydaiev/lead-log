@@ -1,6 +1,7 @@
 package services
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -34,16 +35,42 @@ func TestFormatDailyDigestOmitsEmptySections(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 
-func TestDailyDigestToParsedNoteCarriesSourceNoteIDs(t *testing.T) {
-	owner := "Олена"
-	parsed := dailyDigestToParsedNote(models.DailyDigest{
-		OpenLoops:        []models.DailyOpenLoop{{Title: "Уточнити ETA", Owner: &owner, SourceNoteIDs: []int64{3, 1}}},
-		PeopleHighlights: []models.DailyPeopleHighlight{{PersonName: "Олена", Type: "commitment", Theme: "delivery", Text: "Пообіцяла оновити ETA.", SourceNoteIDs: []int64{3}}},
-	})
-	if got := parsed.Actions[0].SourceNoteIDs; len(got) != 2 || got[0] != 3 || got[1] != 1 {
-		t.Fatalf("action source note ids were not preserved: %#v", got)
+func TestDailyServiceDoesNotPersistStructuredItems(t *testing.T) {
+	content, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
 	}
-	if got := parsed.PeopleNotes[0].SourceNoteIDs; len(got) != 1 || got[0] != 3 {
-		t.Fatalf("people note source note ids were not preserved: %#v", got)
+	dailyStart := strings.Index(string(content), "func (s *Service) DailyAt")
+	weeklyStart := strings.Index(string(content), "func (s *Service) Weekly")
+	if dailyStart < 0 || weeklyStart < 0 || weeklyStart <= dailyStart {
+		t.Fatalf("could not locate DailyAt function body")
+	}
+	dailyBody := string(content)[dailyStart:weeklyStart]
+	for _, forbidden := range []string{"PersistDailyStructured", "dailyDigestToParsedNote", "cachedDailyStructured"} {
+		if strings.Contains(dailyBody, forbidden) {
+			t.Fatalf("/daily must be read-only for actions and people_notes; found %q", forbidden)
+		}
+	}
+	if !strings.Contains(dailyBody, "SaveAgentResponse") || !strings.Contains(dailyBody, "ResponseJSON") {
+		t.Fatalf("/daily should still cache response_text and response_json")
+	}
+}
+
+func TestNowStillSavesParsedStructuredItems(t *testing.T) {
+	content, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
+	}
+	serviceSource := string(content)
+	addNoteStart := strings.Index(serviceSource, "func (s *Service) AddNote")
+	openStart := strings.Index(serviceSource, "func (s *Service) OpenActions")
+	if addNoteStart < 0 || openStart < 0 || openStart <= addNoteStart {
+		t.Fatalf("could not locate AddNote function body")
+	}
+	addNoteBody := serviceSource[addNoteStart:openStart]
+	for _, required := range []string{"ParseManagerNote", "SaveParsedNote"} {
+		if !strings.Contains(addNoteBody, required) {
+			t.Fatalf("/now should still parse and persist structured actions/people_notes; missing %q", required)
+		}
 	}
 }
