@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS notes (
                                      raw_text TEXT NOT NULL,
                                      summary TEXT,
                                      tags TEXT[] NOT NULL DEFAULT '{}',
+                                     processing_status TEXT NOT NULL DEFAULT 'pending',
+                                     processing_started_at TIMESTAMPTZ,
+                                     processed_at TIMESTAMPTZ,
+                                     processing_failed_at TIMESTAMPTZ,
+                                     processing_attempts INTEGER NOT NULL DEFAULT 0,
+                                     processing_error TEXT,
+                                     processing_model TEXT,
+                                     processing_prompt_version TEXT,
                                      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -56,6 +64,8 @@ CREATE TABLE IF NOT EXISTS people_notes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_user_created ON notes(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notes_processing_lookup ON notes(processing_status, processing_started_at, created_at) WHERE processing_status IN ('pending', 'failed', 'processing');
+CREATE INDEX IF NOT EXISTS idx_notes_user_processing ON notes(user_id, processing_status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_actions_user_status ON actions(user_id, status, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_user_idempotency_key ON actions(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_people_notes_person_created ON people_notes(person_id, created_at DESC);

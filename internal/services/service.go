@@ -18,17 +18,20 @@ import (
 )
 
 const PromptVersion = "v1"
+const NoteEnrichmentPromptVersion = "v1"
+const DefaultNoteEnrichmentStaleTimeout = 3 * time.Minute
 
 type Service struct {
-	store         *store.Store
-	llm           llm.ClientLLM
-	dailyLocation *time.Location
-	logger        *slog.Logger
-	language      models.ResponseLanguage
+	store                      *store.Store
+	llm                        llm.ClientLLM
+	dailyLocation              *time.Location
+	logger                     *slog.Logger
+	language                   models.ResponseLanguage
+	noteEnrichmentStaleTimeout time.Duration
 }
 
 func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
-	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default(), language: models.LanguageEnglish}
+	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default(), language: models.LanguageEnglish, noteEnrichmentStaleTimeout: DefaultNoteEnrichmentStaleTimeout}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -49,6 +52,14 @@ func WithResponseLanguage(language models.ResponseLanguage) Option {
 	return func(s *Service) {
 		if language != "" {
 			s.language = language
+		}
+	}
+}
+
+func WithNoteEnrichmentStaleTimeout(timeout time.Duration) Option {
+	return func(s *Service) {
+		if timeout > 0 {
+			s.noteEnrichmentStaleTimeout = timeout
 		}
 	}
 }
@@ -87,21 +98,16 @@ func (s *Service) CaptureNoteForTelegramUpdate(ctx context.Context, userID int64
 }
 
 func (s *Service) AddNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
-	s.logger.Info("immediate processing started", "operation", "now.process", "user_id", userID, "note_length", len(raw))
-	s.logger.Info("LLM call started", "operation", "parse_note", "user_id", userID)
-	parsed, err := s.llm.ParseManagerNote(ctx, raw)
+	noteID, err := s.store.SaveRawNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
 	if err != nil {
-		s.logger.Error("command failed", "operation", "parse_note", "user_id", userID, "error", err)
-		return "", fmt.Errorf("now.llm_request: %w", err)
+		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("LLM call completed", "operation", "parse_note", "user_id", userID, "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
-	noteID, err := s.store.SaveParsedNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, parsed, meta, startedAt)
+	s.logger.Info("note created", "operation", "note.created", "user_id", userID, "note_id", noteID, "status", store.NoteProcessingStatusPending, "note_length", len(raw))
+	result, err := s.EnrichNote(ctx, userID, noteID)
 	if err != nil {
-		s.logger.Error("persistence failed", "operation", "now.persistence", "user_id", userID, "error", err)
-		return "", fmt.Errorf("now.persistence: %w", err)
+		return "", err
 	}
-	s.logger.Info("persistence completed", "operation", "now.persistence", "user_id", userID, "note_id", noteID)
-	return formatParsedNote(noteID, parsed, s.language), nil
+	return formatParsedNote(noteID, result.Parsed, s.language), nil
 }
 
 func (s *Service) DoneForTelegramUpdate(ctx context.Context, userID int64, arg string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
@@ -125,21 +131,74 @@ func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (st
 }
 
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
-	s.logger.Info("immediate processing started", "operation", "now.process", "user_id", userID, "note_length", len(raw))
-	s.logger.Info("LLM call started", "operation", "parse_note", "user_id", userID)
-	parsed, err := s.llm.ParseManagerNote(ctx, raw)
+	noteID, err := s.store.SaveRawNote(ctx, userID, raw)
 	if err != nil {
-		s.logger.Error("command failed", "operation", "parse_note", "user_id", userID, "error", err)
-		return "", fmt.Errorf("now.llm_request: %w", err)
+		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("LLM call completed", "operation", "parse_note", "user_id", userID, "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
-	noteID, err := s.store.SaveParsedNote(ctx, userID, raw, parsed)
+	s.logger.Info("note created", "operation", "note.created", "user_id", userID, "note_id", noteID, "status", store.NoteProcessingStatusPending, "note_length", len(raw))
+	result, err := s.EnrichNote(ctx, userID, noteID)
 	if err != nil {
-		s.logger.Error("persistence failed", "operation", "now.persistence", "user_id", userID, "error", err)
-		return "", fmt.Errorf("now.persistence: %w", err)
+		return "", err
 	}
-	s.logger.Info("persistence completed", "operation", "now.persistence", "user_id", userID, "note_id", noteID)
-	return formatParsedNote(noteID, parsed, s.language), nil
+	return formatParsedNote(noteID, result.Parsed, s.language), nil
+}
+
+type NoteEnrichmentResult struct {
+	NoteID        int64
+	Parsed        models.ParsedNote
+	Attempt       int
+	Model         string
+	PromptVersion string
+}
+
+func (s *Service) EnrichNote(ctx context.Context, userID, noteID int64) (NoteEnrichmentResult, error) {
+	return s.enrichNote(ctx, userID, noteID, false)
+}
+
+func (s *Service) RetryNoteEnrichment(ctx context.Context, userID, noteID int64) (NoteEnrichmentResult, error) {
+	return s.enrichNote(ctx, userID, noteID, false)
+}
+
+func (s *Service) ReprocessNote(ctx context.Context, userID, noteID int64) (NoteEnrichmentResult, error) {
+	s.logger.Info("reprocess started", "operation", "note.reprocess_started", "user_id", userID, "note_id", noteID, "prompt_version", NoteEnrichmentPromptVersion)
+	result, err := s.enrichNote(ctx, userID, noteID, true)
+	if err == nil {
+		s.logger.Info("reprocess completed", "operation", "note.reprocess_completed", "user_id", userID, "note_id", noteID, "attempt", result.Attempt, "model", result.Model, "prompt_version", result.PromptVersion)
+	}
+	return result, err
+}
+
+func (s *Service) enrichNote(ctx context.Context, userID, noteID int64, allowProcessed bool) (NoteEnrichmentResult, error) {
+	claim, err := s.store.ClaimNoteForEnrichment(ctx, userID, noteID, s.noteEnrichmentStaleTimeout, allowProcessed)
+	if err != nil {
+		return NoteEnrichmentResult{}, fmt.Errorf("note.claim_enrichment: %w", err)
+	}
+	if claim.ProcessingStatus != store.NoteProcessingStatusProcessing {
+		s.logger.Info("enrichment not claimed", "operation", "note.enrichment_already_processing", "user_id", userID, "note_id", noteID, "status", claim.ProcessingStatus, "attempt", claim.ProcessingAttempts)
+		return NoteEnrichmentResult{}, fmt.Errorf("note enrichment not claimable: %s", claim.ProcessingStatus)
+	}
+	if claim.StaleReclaimed {
+		s.logger.Info("stale processing note reclaimed", "operation", "note.enrichment_stale_reclaim", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts)
+	}
+	s.logger.Info("enrichment claim success", "operation", "note.enrichment_claim", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "prompt_version", NoteEnrichmentPromptVersion)
+
+	model := s.llm.Model()
+	started := time.Now()
+	s.logger.Info("LLM processing started", "operation", "note.enrichment_llm_started", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
+	parsed, err := s.llm.ParseManagerNote(ctx, claim.RawText)
+	if err != nil {
+		_ = s.store.MarkNoteEnrichmentFailed(ctx, userID, noteID, claim.ProcessingStartedAt, err)
+		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		return NoteEnrichmentResult{}, fmt.Errorf("now.llm_request: %w", err)
+	}
+	s.logger.Info("LLM processing completed", "operation", "note.enrichment_llm_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
+	if err := s.store.SaveNoteEnrichmentResult(ctx, userID, noteID, claim.ProcessingStartedAt, parsed, model, NoteEnrichmentPromptVersion); err != nil {
+		_ = s.store.MarkNoteEnrichmentFailed(ctx, userID, noteID, claim.ProcessingStartedAt, err)
+		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "error", err)
+		return NoteEnrichmentResult{}, fmt.Errorf("now.persistence: %w", err)
+	}
+	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
+	return NoteEnrichmentResult{NoteID: noteID, Parsed: parsed, Attempt: claim.ProcessingAttempts, Model: model, PromptVersion: NoteEnrichmentPromptVersion}, nil
 }
 
 func (s *Service) OpenActions(ctx context.Context, userID int64) (string, error) {

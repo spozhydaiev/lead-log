@@ -40,6 +40,7 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
 - `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` — how long an in-flight Telegram update may stay `processing` before a retry can reclaim it. Defaults to `2m`, which leaves headroom above the 45-second LLM HTTP timeout.
+- `NOTE_ENRICHMENT_PROCESSING_TIMEOUT` — how long a note enrichment claim may stay `processing` before an explicit retry/reprocess can reclaim it as stale. Defaults to `3m`, which is longer than the Telegram update timeout and the LLM HTTP timeout.
 - `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `08:45`.
@@ -65,7 +66,7 @@ Every LLM prompt explicitly asks the model to return user-facing text in the con
 
 LeadLog uses Go's standard `log/slog` package for structured development logs. Configure logs with `LOG_LEVEL` and `LOG_FORMAT`; use `LOG_FORMAT=json` when shipping logs to a collector.
 
-Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, response language, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
+Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, response language, note enrichment timeout, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
 
 Privacy rules for logs:
 - Telegram user IDs may be logged for development diagnostics.
@@ -145,7 +146,7 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 - `/start` or `/help` — show help.
 - `/note <text>` — save a raw manager note without immediate AI processing. `/note` without text is rejected with a usage message and does not create a note.
 - Plain text — save a raw manager note without typing `/note` and without immediate AI processing. Unknown slash commands are rejected with a localized help hint and are not saved as notes.
-- `/now <text>` — save and immediately structure a manager note through the LLM parsing flow.
+- `/now <text>` — save the raw manager note first, then synchronously claim and structure that saved note through the reusable LLM enrichment flow.
 - `/open` — show open loops created only by explicit `/now` processing.
 - `/done <action_id>` — mark an open loop as done.
 - `/daily` — generate today’s manager digest from raw notes and cache the response without creating actions or people notes.
@@ -162,4 +163,4 @@ Incoming authorized Telegram text messages are claimed in a persistent PostgreSQ
 
 `telegram_update_id` is unique, with an additional `(telegram_chat_id, telegram_message_id)` unique index as a message-level fallback. Duplicate updates that are already `processed` or currently `processing` are skipped without rerunning service logic, calling the LLM, mutating domain tables, or sending another Telegram response. Failed updates can be reclaimed until the built-in attempt cap is reached; `processing` updates older than `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` can be reclaimed after a crash.
 
-For raw note capture, `/now`, and `/done`, the domain mutation and `processed` marker are committed in one short database transaction after the update has been claimed. `/now` still performs the LLM call before that transaction so the app does not hold a database transaction open during the HTTP request. Read-only commands and validation responses are marked processed before sending the Telegram response. If the database commit succeeds but sending the Telegram response fails, the update remains processed and automatic replay is intentionally skipped; domain correctness is preferred over response resend for this MVP.
+For raw note capture and `/done`, the domain mutation and `processed` marker are committed in one short database transaction after the update has been claimed. `/now` first commits the raw note together with the Telegram `processed` marker, then runs note enrichment through a separate note lifecycle (`pending`, `processing`, `processed`, `failed`). This prevents Telegram redelivery from repeatedly calling the LLM after the raw note is durably captured. The LLM HTTP request is outside database transactions; enrichment persistence uses a short transaction that replaces generated actions and people notes owned by that note. Read-only commands and validation responses are marked processed before sending the Telegram response. If the database commit succeeds but sending the Telegram response fails, the update remains processed and automatic replay is intentionally skipped; domain correctness is preferred over response resend for this MVP.

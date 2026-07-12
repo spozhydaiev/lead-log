@@ -68,7 +68,7 @@ func TestNowStillSavesParsedStructuredItems(t *testing.T) {
 		t.Fatalf("could not locate AddNote function body")
 	}
 	addNoteBody := serviceSource[addNoteStart:openStart]
-	for _, required := range []string{"ParseManagerNote", "SaveParsedNote"} {
+	for _, required := range []string{"EnrichNote", "SaveNoteEnrichmentResult"} {
 		if !strings.Contains(addNoteBody, required) {
 			t.Fatalf("/now should still parse and persist structured actions/people_notes; missing %q", required)
 		}
