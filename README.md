@@ -3,7 +3,7 @@ Project: Telegram bot for private manager notes.
 Purpose:
 - Capture raw manager notes.
 - Generate daily/weekly summaries.
-- Extract follow-ups, ticket drafts, people highlights.
+- Generate source-backed daily and weekly recall summaries.
 - No employee monitoring.
 - No performance scoring.
 - No employee ranking.
@@ -103,17 +103,11 @@ Set `DAILY_SUMMARY_ENABLED=true` to send the cached or newly generated daily sum
 - `/note <text>` — save a raw manager note without immediate AI processing.
 - Plain text — save a raw manager note without typing `/note` and without immediate AI processing.
 - `/now <text>` — save and immediately structure a manager note through the LLM parsing flow.
-- `/open` — show open loops created by `/now` or other explicit processing commands.
+- `/open` — show open loops created only by explicit `/now` processing.
 - `/done <action_id>` — mark an open loop as done.
-- `/people` — list people and configured aliases.
-- `/alias <alias> = <canonical_name>` — add a normalized lookup alias for a canonical person. For example, `/alias Andrii = Андрій`.
-- `/merge <source_person> = <target_person>` — merge a duplicate person into the target person, preserving notes and linked actions and saving the source name as an alias. For example, `/merge Andrii = Андрій`.
-- `/person <name>` — show person-specific context for the last 90 days. Aliases resolve to the canonical person.
-- `/person <name> --refresh` — regenerate person context instead of using cache.
-- `/agenda <name>` — generate a concise Ukrainian 1:1 agenda from the person’s existing notes and open actions for the last 90 days. Aliases resolve to the canonical person.
-- `/agenda <name> --refresh` — regenerate the 1:1 agenda instead of using cache without creating new actions or people notes.
-- `/ticket <context>` — generate a Jira-style ticket draft.
 - `/daily` — generate today’s manager digest from raw notes and cache the response without creating actions or people notes.
 - `/daily --refresh` — regenerate today’s digest/cache without creating actions or people notes.
 - `/weekly` — generate a digest for the last 7 days.
 - `/weekly --refresh` — regenerate the weekly digest instead of using cache.
+
+Out of MVP scope for now: person context, 1:1 agenda generation, performance review packs, Jira integration, calendar integration, monitoring integrations, voice transcription, web UI, multi-user workspaces, and billing. Existing database tables and migrations for older data are left in place for backward compatibility.

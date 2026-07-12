@@ -16,12 +16,9 @@ import (
 
 type ClientLLM interface {
 	ParseManagerNote(ctx context.Context, raw string) (models.ParsedNote, error)
-	GenerateTicket(ctx context.Context, input string) (models.TicketDraft, error)
 	ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error)
 	SummarizeWeekly(ctx context.Context, input string) (string, error)
 	Model() string
-	SummarizePerson(ctx context.Context, input string) (string, error)
-	GenerateAgenda(ctx context.Context, input string) (models.Agenda, error)
 }
 
 type Client struct {
@@ -62,34 +59,6 @@ type chatCompletionResponse struct {
 	} `json:"choices"`
 }
 
-func (c *Client) SummarizePerson(ctx context.Context, input string) (string, error) {
-	prompt := personPrompt() + "\n\nPerson context:\n" + input
-	return c.chatText(ctx, prompt)
-}
-
-func (c *Client) GenerateAgenda(ctx context.Context, input string) (models.Agenda, error) {
-	prompt := agendaPrompt() + "\n\nPerson context and open actions:\n" + input
-	content, err := c.chatJSON(ctx, prompt)
-	if err != nil {
-		return models.Agenda{}, err
-	}
-	return ParseAgendaJSON(content)
-}
-
-func personPrompt() string {
-	return `You are preparing a concise person context summary for a team lead.
-Respond in Ukrainian.
-Do not evaluate the employee. Do not score people. Do not recommend HR decisions.
-Only summarize manager-provided notes.
-Group information into:
-1. Open follow-ups
-2. Positive signals
-3. Concerns or risks
-4. Growth topics
-5. Suggested 1:1 topics
-Every claim must be based on the provided notes.`
-}
-
 func (c *Client) Model() string {
 	return c.model
 }
@@ -106,19 +75,6 @@ func (c *Client) ParseManagerNote(ctx context.Context, raw string) (models.Parse
 		return models.ParsedNote{}, fmt.Errorf("parse llm json: %w; content=%s", err, content)
 	}
 	return parsed, nil
-}
-
-func (c *Client) GenerateTicket(ctx context.Context, input string) (models.TicketDraft, error) {
-	prompt := ticketPrompt() + "\n\nInput:\n" + input
-	content, err := c.chatJSON(ctx, prompt)
-	if err != nil {
-		return models.TicketDraft{}, err
-	}
-	var draft models.TicketDraft
-	if err := json.Unmarshal([]byte(content), &draft); err != nil {
-		return models.TicketDraft{}, fmt.Errorf("parse ticket json: %w; content=%s", err, content)
-	}
-	return draft, nil
 }
 
 func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
@@ -194,7 +150,7 @@ Do not invent facts.
 If something is uncertain, keep it as a suggested follow-up or question.
 Use source-bound, careful wording.
 Always respond in Ukrainian.
-All user-facing summaries, actions, ticket drafts, agendas and explanations must be in Ukrainian, regardless of the input language.
+All user-facing summaries, actions and explanations must be in Ukrainian, regardless of the input language.
 Do not switch language unless the user explicitly asks.
 Respond in Ukrainian, but preserve person names as they are stored in the user's canonical people database.
 Do not translate or transliterate person names unless mapping to an existing canonical person.
@@ -209,32 +165,13 @@ Return valid JSON only with this shape:
   "people_notes": [
     {
       "person_name": "name",
-      "type": "positive_signal|concern|growth_topic|context|follow_up_needed|commitment|decision|risk|blocker|review_evidence",
+      "type": "positive_signal|concern|growth_topic|context|follow_up_needed|commitment|decision|risk|blocker",
       "theme": "ownership|communication|delivery|collaboration|technical_quality|reliability|mentorship|process|",
       "text": "neutral source-bound note",
       "include_in_review": true
     }
   ],
-  "ticket_drafts": [
-    {"title": "", "context": "", "problem": "", "acceptance_criteria": [""]}
-  ],
   "suggested_questions": ["clarifying questions if useful"]
-}`
-}
-
-func ticketPrompt() string {
-	return `Create a concise Jira-style ticket draft from the manager-provided input.
-Do not invent technical details. If context is missing, write conservative acceptance criteria.
-Language rules:
-- Respond in English.
-- Keep all user-facing text in English.
-
-Return valid JSON only:
-{
-  "title": "",
-  "context": "",
-  "problem": "",
-  "acceptance_criteria": [""]
 }`
 }
 
@@ -280,45 +217,12 @@ Return valid JSON only with this exact shape. Use empty arrays for empty section
 func weeklyPrompt() string {
 	return `You are preparing a weekly manager digest from manager-provided notes and actions.
 Do not evaluate employees. Do not score people. Do not recommend HR decisions.
-Summarize open loops, people highlights, risks, positive signals, concerns, and suggested 1:1 topics.
+Summarize what happened, important topics, open loops, risks, decisions, suggested next steps, and what the manager worked on personally.
 Every claim must be phrased as based on the provided notes.
 Keep it concise and practical.
 Always respond in Ukrainian.
-All user-facing summaries, actions, ticket drafts, agendas and explanations must be in Ukrainian, regardless of the input language.
+All user-facing summaries, actions and explanations must be in Ukrainian, regardless of the input language.
 Do not switch language unless the user explicitly asks.
 Respond in Ukrainian, but preserve person names as they are stored in the user's canonical people database.
 Do not translate or transliterate person names unless mapping to an existing canonical person.`
-}
-
-func agendaPrompt() string {
-	return `You are preparing a concise 1:1 agenda for a team lead from existing manager-provided notes and open actions.
-Respond in Ukrainian for all user-facing field values.
-Keep it practical, conversational, neutral, and source-bound.
-Do not evaluate the employee. Do not score people. Do not rank people. Do not recommend HR decisions.
-Do not say someone is a low performer. Do not invent facts.
-Every agenda item must be based on the provided people notes or open actions.
-If a section has no source-backed items, return an empty array.
-Use source_note_ids from the source when available; for open actions without source notes, use an empty source_note_ids array.
-
-Return valid JSON only with this exact shape:
-{
-  "discussion_topics": [
-    {"title": "short topic", "context": "why it is useful to discuss, based only on notes", "source_note_ids": [1]}
-  ],
-  "open_followups": [
-    {"text": "open follow-up", "source_note_ids": [1]}
-  ],
-  "positive_signals": [
-    {"text": "positive source-backed signal to mention", "source_note_ids": [1]}
-  ],
-  "risks_or_concerns_to_clarify": [
-    {"text": "risk or concern framed as something to clarify", "source_note_ids": [1]}
-  ],
-  "growth_topics": [
-    {"text": "source-backed growth topic", "source_note_ids": [1]}
-  ],
-  "suggested_questions": [
-    {"text": "conversational question", "source_note_ids": [1]}
-  ]
-}`
 }

@@ -37,10 +37,6 @@ func (m *MockClientLLM) ParseManagerNote(ctx context.Context, raw string) (model
 	}, nil
 }
 
-func (m *MockClientLLM) GenerateTicket(ctx context.Context, input string) (models.TicketDraft, error) {
-	return models.TicketDraft{}, nil
-}
-
 func (m *MockClientLLM) ProcessDaily(ctx context.Context, input string) (models.DailyDigest, error) {
 	owner := "Person name"
 	return models.DailyDigest{
@@ -52,17 +48,6 @@ func (m *MockClientLLM) ProcessDaily(ctx context.Context, input string) (models.
 
 func (m *MockClientLLM) SummarizeWeekly(ctx context.Context, input string) (string, error) {
 	return input, nil
-}
-
-func (m *MockClientLLM) SummarizePerson(ctx context.Context, input string) (string, error) {
-	return input, nil
-}
-
-func (m *MockClientLLM) GenerateAgenda(ctx context.Context, input string) (models.Agenda, error) {
-	return models.Agenda{
-		DiscussionTopics: []models.AgendaDiscussionTopic{{Title: "Уточнити поточний фокус", Context: "Є релевантні нотатки для обговорення.", SourceNoteIDs: []int64{1}}},
-		OpenFollowups:    []models.AgendaTextItem{{Text: "Обговорити відкритий follow-up.", SourceNoteIDs: []int64{1}}},
-	}, nil
 }
 
 func (m *MockClientLLM) Model() string {
