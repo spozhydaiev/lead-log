@@ -76,22 +76,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		response, err = b.svc.AddNote(ctx, userID, arg)
 	case "/open":
 		response, err = b.svc.OpenActions(ctx, userID)
-	case "/people":
-		response, err = b.svc.People(ctx, userID)
-	case "/alias":
-		response, err = b.svc.Alias(ctx, userID, arg)
-	case "/merge":
-		response, err = b.svc.Merge(ctx, userID, arg)
 	case "/done":
 		response, err = b.svc.Done(ctx, userID, arg)
-	case "/person":
-		cleanArg, refresh := utils.StripRefreshFlag(arg)
-		response, err = b.svc.Person(ctx, userID, cleanArg, refresh)
-	case "/agenda":
-		cleanArg, refresh := utils.StripRefreshFlag(arg)
-		response, err = b.svc.Agenda(ctx, userID, cleanArg, refresh)
-	case "/ticket":
-		response, err = b.svc.Ticket(ctx, arg)
 	case "/daily":
 		response, err = b.svc.Daily(ctx, userID, utils.HasRefreshFlag(arg))
 	case "/weekly":
@@ -168,16 +154,12 @@ func helpText() string {
 Команди:
 /note <текст> — швидко зберегти сиру нотатку без AI-обробки
 /now <текст> — зберегти й одразу структурувати нотатку
-/open — показати відкриті дії
+/open — показати відкриті дії, створені лише через явну /now-обробку
 /done <action_id> — позначити дію виконаною
-/people — список людей та аліасів
-/alias <аліас> = <канонічне_імʼя> — додати аліас для людини
-/merge <джерело> = <ціль> — безпечно обʼєднати дублікати людей
-/person <імʼя> — контекст щодо людини за останні 90 днів
-/agenda <імʼя> — практична agenda для 1:1 за останні 90 днів
-/ticket <контекст> — згенерувати чернетку Jira-style ticket
 /daily — денний дайджест за сьогодні без створення дій чи нотаток про людей
-/weekly — тижневий дайджест
+/daily --refresh — згенерувати денний дайджест заново
+/weekly — тижневий дайджест за останні 7 днів
+/weekly --refresh — згенерувати тижневий дайджест заново
 
 Порада: можна надіслати звичайний текст без /note. Він збережеться як сира нотатка для /daily.`
 }
