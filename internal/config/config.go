@@ -27,6 +27,7 @@ type Config struct {
 	LogFormat                       string
 	ResponseLanguage                models.ResponseLanguage
 	TelegramUpdateProcessingTimeout time.Duration
+	NoteEnrichmentProcessingTimeout time.Duration
 }
 
 func Load() Config {
@@ -50,6 +51,11 @@ func Load() Config {
 		panic("invalid env var TELEGRAM_UPDATE_PROCESSING_TIMEOUT: must be a duration greater than 45s")
 	}
 
+	noteEnrichmentProcessingTimeout, err := time.ParseDuration(envOr("NOTE_ENRICHMENT_PROCESSING_TIMEOUT", "3m"))
+	if err != nil || noteEnrichmentProcessingTimeout <= telegramUpdateProcessingTimeout {
+		panic("invalid env var NOTE_ENRICHMENT_PROCESSING_TIMEOUT: must be a duration greater than TELEGRAM_UPDATE_PROCESSING_TIMEOUT")
+	}
+
 	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
 	if err != nil {
 		panic(err.Error())
@@ -71,6 +77,7 @@ func Load() Config {
 		LogFormat:                       envOr("LOG_FORMAT", "text"),
 		ResponseLanguage:                responseLanguage,
 		TelegramUpdateProcessingTimeout: telegramUpdateProcessingTimeout,
+		NoteEnrichmentProcessingTimeout: noteEnrichmentProcessingTimeout,
 	}
 }
 

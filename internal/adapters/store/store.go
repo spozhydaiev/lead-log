@@ -15,6 +15,23 @@ import (
 )
 
 const (
+	NoteProcessingStatusPending    = "pending"
+	NoteProcessingStatusProcessing = "processing"
+	NoteProcessingStatusProcessed  = "processed"
+	NoteProcessingStatusFailed     = "failed"
+)
+
+type NoteForEnrichment struct {
+	ID                  int64
+	UserID              int64
+	RawText             string
+	ProcessingStatus    string
+	ProcessingStartedAt time.Time
+	ProcessingAttempts  int
+	StaleReclaimed      bool
+}
+
+const (
 	TelegramUpdateStatusProcessing = "processing"
 	TelegramUpdateStatusProcessed  = "processed"
 	TelegramUpdateStatusFailed     = "failed"
@@ -94,8 +111,8 @@ func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, pa
 
 	var noteID int64
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO notes (user_id, raw_text, summary, tags)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO notes (user_id, raw_text, summary, tags, processing_status, processed_at)
+		VALUES ($1, $2, $3, $4, 'processed', now())
 		RETURNING id
 	`, userID, raw, parsed.Summary, parsed.Tags).Scan(&noteID); err != nil {
 		return 0, err
@@ -189,6 +206,130 @@ func upsertPerson(ctx context.Context, tx pgx.Tx, userID int64, name string) (in
 		ON CONFLICT (user_id, normalized_alias) DO NOTHING
 	`, userID, id, name, normalized)
 	return id, err
+}
+
+func (s *Store) ClaimNoteForEnrichment(ctx context.Context, userID, noteID int64, staleAfter time.Duration, allowProcessed bool) (NoteForEnrichment, error) {
+	var note NoteForEnrichment
+	staleSeconds := int64(staleAfter.Seconds())
+	statuses := []string{NoteProcessingStatusPending, NoteProcessingStatusFailed}
+	if allowProcessed {
+		statuses = append(statuses, NoteProcessingStatusProcessed)
+	}
+	err := s.pool.QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT id, processing_status AS old_status
+			FROM notes
+			WHERE id=$1 AND user_id=$2
+			  AND (processing_status = ANY($3) OR (processing_status=$4 AND processing_started_at < now() - make_interval(secs => $5)))
+			FOR UPDATE
+		)
+		UPDATE notes n
+		SET processing_status=$6,
+		    processing_started_at=now(),
+		    processing_failed_at=NULL,
+		    processing_error=NULL,
+		    processing_attempts=processing_attempts+1
+		FROM candidate
+		WHERE n.id = candidate.id
+		RETURNING n.id, n.user_id, n.raw_text, n.processing_status, n.processing_started_at, n.processing_attempts,
+		          (candidate.old_status = $4)
+	`, noteID, userID, statuses, NoteProcessingStatusProcessing, staleSeconds, NoteProcessingStatusProcessing).Scan(&note.ID, &note.UserID, &note.RawText, &note.ProcessingStatus, &note.ProcessingStartedAt, &note.ProcessingAttempts, &note.StaleReclaimed)
+	if err == nil {
+		return note, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return note, err
+	}
+	err = s.pool.QueryRow(ctx, `SELECT id, user_id, raw_text, processing_status, COALESCE(processing_started_at, created_at), processing_attempts FROM notes WHERE id=$1 AND user_id=$2`, noteID, userID).Scan(&note.ID, &note.UserID, &note.RawText, &note.ProcessingStatus, &note.ProcessingStartedAt, &note.ProcessingAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return note, fmt.Errorf("note not found")
+	}
+	return note, err
+}
+
+func (s *Store) SaveNoteEnrichmentResult(ctx context.Context, userID, noteID int64, startedAt time.Time, parsed models.ParsedNote, model, promptVersion string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM actions WHERE user_id=$1 AND note_id=$2`, userID, noteID)
+	_ = tag
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM people_notes WHERE user_id=$1 AND note_id=$2`, userID, noteID); err != nil {
+		return err
+	}
+	if err := saveStructuredRecordsForNoteTx(ctx, tx, userID, noteID, parsed); err != nil {
+		return err
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE notes
+		SET summary=$4, tags=$5, processing_status='processed', processed_at=now(), processing_failed_at=NULL,
+		    processing_error=NULL, processing_model=$6, processing_prompt_version=$7
+		WHERE user_id=$1 AND id=$2 AND processing_status='processing' AND processing_started_at=$3
+	`, userID, noteID, startedAt, parsed.Summary, parsed.Tags, model, promptVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("note enrichment claim no longer active")
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) MarkNoteEnrichmentFailed(ctx context.Context, userID, noteID int64, startedAt time.Time, cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE notes SET processing_status='failed', processing_failed_at=now(), processing_error=$4 WHERE user_id=$1 AND id=$2 AND processing_status='processing' AND processing_started_at=$3`, userID, noteID, startedAt, msg)
+	return err
+}
+
+func saveStructuredRecordsForNoteTx(ctx context.Context, tx pgx.Tx, userID, noteID int64, parsed models.ParsedNote) error {
+	personIDs := map[string]int64{}
+	for _, pn := range parsed.PeopleNotes {
+		name := strings.TrimSpace(pn.PersonName)
+		if name == "" {
+			continue
+		}
+		pid, err := upsertPerson(ctx, tx, userID, name)
+		if err != nil {
+			return err
+		}
+		personIDs[NormalizePersonName(name)] = pid
+		if _, err := tx.Exec(ctx, `INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, pid, noteID, emptyTo(pn.Type, "context"), pn.Theme, pn.Text, pn.IncludeInReview); err != nil {
+			return err
+		}
+	}
+	for _, action := range parsed.Actions {
+		title := strings.TrimSpace(action.Title)
+		if title == "" {
+			continue
+		}
+		var linkedPersonID *int64
+		if action.LinkedPersonName != "" {
+			key := NormalizePersonName(action.LinkedPersonName)
+			pid, ok := personIDs[key]
+			var err error
+			if !ok {
+				pid, err = upsertPerson(ctx, tx, userID, action.LinkedPersonName)
+				if err != nil {
+					return err
+				}
+			}
+			linkedPersonID = &pid
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type) VALUES ($1,$2,$3,$4,$5)`, userID, noteID, linkedPersonID, title, action.OutputType); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ListOpenActions(ctx context.Context, userID int64, limit int) ([]models.Action, error) {
@@ -563,45 +704,11 @@ func (s *Store) MarkActionDoneAndMarkTelegramUpdateProcessed(ctx context.Context
 
 func saveParsedNoteTx(ctx context.Context, tx pgx.Tx, userID int64, raw string, parsed models.ParsedNote) (int64, error) {
 	var noteID int64
-	if err := tx.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text, summary, tags) VALUES ($1,$2,$3,$4) RETURNING id`, userID, raw, parsed.Summary, parsed.Tags).Scan(&noteID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text, summary, tags, processing_status, processed_at) VALUES ($1,$2,$3,$4,'processed',now()) RETURNING id`, userID, raw, parsed.Summary, parsed.Tags).Scan(&noteID); err != nil {
 		return 0, err
 	}
-	personIDs := map[string]int64{}
-	for _, pn := range parsed.PeopleNotes {
-		name := strings.TrimSpace(pn.PersonName)
-		if name == "" {
-			continue
-		}
-		pid, err := upsertPerson(ctx, tx, userID, name)
-		if err != nil {
-			return 0, err
-		}
-		personIDs[NormalizePersonName(name)] = pid
-		if _, err := tx.Exec(ctx, `INSERT INTO people_notes (user_id, person_id, note_id, type, theme, text, include_in_review) VALUES ($1,$2,$3,$4,$5,$6,$7)`, userID, pid, noteID, emptyTo(pn.Type, "context"), pn.Theme, pn.Text, pn.IncludeInReview); err != nil {
-			return 0, err
-		}
-	}
-	for _, action := range parsed.Actions {
-		title := strings.TrimSpace(action.Title)
-		if title == "" {
-			continue
-		}
-		var linkedPersonID *int64
-		if action.LinkedPersonName != "" {
-			key := NormalizePersonName(action.LinkedPersonName)
-			pid, ok := personIDs[key]
-			var err error
-			if !ok {
-				pid, err = upsertPerson(ctx, tx, userID, action.LinkedPersonName)
-				if err != nil {
-					return 0, err
-				}
-			}
-			linkedPersonID = &pid
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO actions (user_id, note_id, linked_person_id, title, output_type) VALUES ($1,$2,$3,$4,$5)`, userID, noteID, linkedPersonID, title, action.OutputType); err != nil {
-			return 0, err
-		}
+	if err := saveStructuredRecordsForNoteTx(ctx, tx, userID, noteID, parsed); err != nil {
+		return 0, err
 	}
 	return noteID, nil
 }

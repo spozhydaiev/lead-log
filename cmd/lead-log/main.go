@@ -34,6 +34,7 @@ func main() {
 		"log_format", cfg.LogFormat,
 		"response_language", string(cfg.ResponseLanguage),
 		"response_language_name", cfg.ResponseLanguage.DisplayName(),
+		"note_enrichment_processing_timeout", cfg.NoteEnrichmentProcessingTimeout.String(),
 	)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
@@ -52,7 +53,7 @@ func main() {
 	st := store.New(pool, logger.With("component", "store"))
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ResponseLanguage, logger.With("component", "llm"))
 
-	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
+	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithNoteEnrichmentStaleTimeout(cfg.NoteEnrichmentProcessingTimeout), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
 
 	telegramBot, err := bot.New(cfg, service, logger.With("component", "bot"))
 	if err != nil {
