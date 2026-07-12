@@ -18,7 +18,7 @@ func TestNowUsesReusableNoteEnrichmentFlow(t *testing.T) {
 		t.Fatal("could not locate AddNote body")
 	}
 	addBody := source[addStart:openStart]
-	for _, required := range []string{"SaveRawNote", "EnrichNote", "formatParsedNote"} {
+	for _, required := range []string{"CreateAndClaimNoteForEnrichment", "EnrichClaimedNote", "formatParsedNote"} {
 		if !strings.Contains(addBody, required) {
 			t.Fatalf("AddNote must use reusable enrichment flow; missing %q", required)
 		}

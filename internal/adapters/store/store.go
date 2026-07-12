@@ -102,6 +102,117 @@ func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int6
 	return noteID, err
 }
 
+func (s *Store) CreateAndClaimNoteForEnrichment(ctx context.Context, userID int64, raw string) (NoteForEnrichment, error) {
+	var note NoteForEnrichment
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO notes (user_id, raw_text, processing_status, processing_started_at, processing_attempts)
+		VALUES ($1, $2, $3, now(), 1)
+		RETURNING id, user_id, raw_text, processing_status, processing_started_at, processing_attempts, false
+	`, userID, raw, NoteProcessingStatusProcessing).Scan(&note.ID, &note.UserID, &note.RawText, &note.ProcessingStatus, &note.ProcessingStartedAt, &note.ProcessingAttempts, &note.StaleReclaimed)
+	if err != nil {
+		s.logDBError("store.create_and_claim_note_for_enrichment", err)
+	}
+	return note, err
+}
+
+func (s *Store) ClaimNextNotesForEnrichment(ctx context.Context, limit, maxAttempts int, staleAfter time.Duration) ([]NoteForEnrichment, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if maxAttempts <= 0 {
+		return nil, nil
+	}
+	staleSeconds := int64(staleAfter.Seconds())
+	rows, err := s.pool.Query(ctx, `
+		WITH candidate AS (
+			SELECT id, processing_status AS old_status
+			FROM notes
+			WHERE processing_attempts < $1
+			  AND (
+				processing_status = $2
+				OR (processing_status = $3 AND COALESCE(next_processing_at, processing_failed_at, created_at) <= now())
+				OR (processing_status = $4 AND processing_started_at < now() - make_interval(secs => $5))
+			  )
+			ORDER BY COALESCE(next_processing_at, created_at), id
+			LIMIT $6
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE notes n
+		SET processing_status=$4,
+		    processing_started_at=now(),
+		    processing_failed_at=NULL,
+		    processing_error=NULL,
+		    next_processing_at=NULL,
+		    processing_attempts=processing_attempts+1
+		FROM candidate
+		WHERE n.id = candidate.id
+		RETURNING n.id, n.user_id, n.raw_text, n.processing_status, n.processing_started_at, n.processing_attempts,
+		          (candidate.old_status = $4)
+	`, maxAttempts, NoteProcessingStatusPending, NoteProcessingStatusFailed, NoteProcessingStatusProcessing, staleSeconds, limit)
+	if err != nil {
+		s.logDBError("store.claim_next_notes_for_enrichment", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var notes []NoteForEnrichment
+	for rows.Next() {
+		var note NoteForEnrichment
+		if err := rows.Scan(&note.ID, &note.UserID, &note.RawText, &note.ProcessingStatus, &note.ProcessingStartedAt, &note.ProcessingAttempts, &note.StaleReclaimed); err != nil {
+			return nil, err
+		}
+		notes = append(notes, note)
+	}
+	return notes, rows.Err()
+}
+
+func (s *Store) ScheduleNoteEnrichmentRetry(ctx context.Context, userID, noteID int64, startedAt time.Time, nextAt time.Time, cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE notes SET processing_status='failed', processing_failed_at=now(), processing_error=$4, next_processing_at=$5 WHERE user_id=$1 AND id=$2 AND processing_started_at=$3`, userID, noteID, startedAt, msg, nextAt)
+	return err
+}
+
+func (s *Store) MarkNoteEnrichmentPermanentlyFailed(ctx context.Context, userID, noteID int64, startedAt time.Time, cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE notes SET processing_status='failed', processing_failed_at=now(), processing_error=$4, next_processing_at=NULL WHERE user_id=$1 AND id=$2 AND processing_started_at=$3`, userID, noteID, startedAt, msg)
+	return err
+}
+
+func (s *Store) CreateAndClaimNoteForEnrichmentAndMarkTelegramUpdateProcessed(ctx context.Context, userID int64, raw string, meta TelegramUpdateMeta, startedAt time.Time) (NoteForEnrichment, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return NoteForEnrichment{}, err
+	}
+	defer tx.Rollback(ctx)
+	var note NoteForEnrichment
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO notes (user_id, raw_text, processing_status, processing_started_at, processing_attempts)
+		VALUES ($1, $2, $3, now(), 1)
+		RETURNING id, user_id, raw_text, processing_status, processing_started_at, processing_attempts, false
+	`, userID, raw, NoteProcessingStatusProcessing).Scan(&note.ID, &note.UserID, &note.RawText, &note.ProcessingStatus, &note.ProcessingStartedAt, &note.ProcessingAttempts, &note.StaleReclaimed); err != nil {
+		return NoteForEnrichment{}, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE telegram_updates SET status='processed', processed_at=now(), last_error=NULL WHERE (telegram_update_id=$1 OR (telegram_chat_id=$3 AND telegram_message_id=$4)) AND status='processing' AND processing_started_at=$2`, meta.UpdateID, startedAt, meta.ChatID, meta.MessageID)
+	if err != nil {
+		return NoteForEnrichment{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return NoteForEnrichment{}, fmt.Errorf("telegram update claim no longer active")
+	}
+	return note, tx.Commit(ctx)
+}
+
 func (s *Store) SaveParsedNote(ctx context.Context, userID int64, raw string, parsed models.ParsedNote) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -267,7 +378,7 @@ func (s *Store) SaveNoteEnrichmentResult(ctx context.Context, userID, noteID int
 	tag, err = tx.Exec(ctx, `
 		UPDATE notes
 		SET summary=$4, tags=$5, processing_status='processed', processed_at=now(), processing_failed_at=NULL,
-		    processing_error=NULL, processing_model=$6, processing_prompt_version=$7
+		    processing_error=NULL, next_processing_at=NULL, processing_model=$6, processing_prompt_version=$7
 		WHERE user_id=$1 AND id=$2 AND processing_status='processing' AND processing_started_at=$3
 	`, userID, noteID, startedAt, parsed.Summary, parsed.Tags, model, promptVersion)
 	if err != nil {

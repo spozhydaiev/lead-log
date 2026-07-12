@@ -40,7 +40,12 @@ The app reads configuration from environment variables. A local `.env` file is a
 - `LLM_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
 - `LLM_MODEL` — model name used for parsing and summaries. Defaults to `gpt-4.1-mini`.
 - `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` — how long an in-flight Telegram update may stay `processing` before a retry can reclaim it. Defaults to `2m`, which leaves headroom above the 45-second LLM HTTP timeout.
-- `NOTE_ENRICHMENT_PROCESSING_TIMEOUT` — how long a note enrichment claim may stay `processing` before an explicit retry/reprocess can reclaim it as stale. Defaults to `3m`, which is longer than the Telegram update timeout and the LLM HTTP timeout.
+- `NOTE_ENRICHMENT_PROCESSING_TIMEOUT` — how long a note enrichment claim may stay `processing` before explicit retry/reprocess or the background worker can reclaim it as stale. Defaults to `3m`, which is longer than the Telegram update timeout and the LLM HTTP timeout.
+- `NOTE_ENRICHMENT_WORKER_ENABLED` — enables the PostgreSQL-backed background note enrichment worker. Defaults to `true`; set to `false` to keep captured notes pending until explicit processing.
+- `NOTE_ENRICHMENT_POLL_INTERVAL` — worker polling interval. Defaults to `5s`.
+- `NOTE_ENRICHMENT_BATCH_SIZE` — maximum notes claimed per worker poll. Defaults to `10`.
+- `NOTE_ENRICHMENT_WORKER_CONCURRENCY` — maximum concurrent enrichment jobs per app instance. Defaults to `1`.
+- `NOTE_ENRICHMENT_MAX_ATTEMPTS` — maximum automatic enrichment attempts before a note remains failed without automatic retry. Defaults to `3`.
 - `RESPONSE_LANGUAGE` — language for agent-generated and static bot responses. Supported values are `en` (English), `uk` (Ukrainian), and `pl` (Polish). Defaults to `en`; unsupported values fail startup instead of falling back.
 - `DAILY_SUMMARY_ENABLED` — starts the background daily summary scheduler when set to `true`. Defaults to `false`.
 - `DAILY_SUMMARY_TIME` — local time for scheduled daily summaries in `HH:MM` format. Defaults to `08:45`.
@@ -66,7 +71,7 @@ Every LLM prompt explicitly asks the model to return user-facing text in the con
 
 LeadLog uses Go's standard `log/slog` package for structured development logs. Configure logs with `LOG_LEVEL` and `LOG_FORMAT`; use `LOG_FORMAT=json` when shipping logs to a collector.
 
-Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, response language, note enrichment timeout, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
+Startup logs include only environment-safe configuration values such as the LLM model, LLM base URL host, response language, note enrichment timeout, background worker settings, daily summary schedule, timezone, and selected log settings. Runtime logs include stable `component` and `operation` fields plus metadata such as Telegram user ID, command name, note length, cache hit/miss, source hash prefix, item counts, duration, HTTP status, and failure stage.
 
 Privacy rules for logs:
 - Telegram user IDs may be logged for development diagnostics.
@@ -144,9 +149,9 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 ## Bot commands
 
 - `/start` or `/help` — show help.
-- `/note <text>` — save a raw manager note without immediate AI processing. `/note` without text is rejected with a usage message and does not create a note.
-- Plain text — save a raw manager note without typing `/note` and without immediate AI processing. Unknown slash commands are rejected with a localized help hint and are not saved as notes.
-- `/now <text>` — save the raw manager note first, then synchronously claim and structure that saved note through the reusable LLM enrichment flow.
+- `/note <text>` — quickly save a raw manager note as `pending`; the background worker enriches it later without sending a second Telegram message. `/note` without text is rejected with a usage message and does not create a note.
+- Plain text — quickly save a raw manager note as `pending` without typing `/note`; the Telegram handler does not call the LLM. Unknown slash commands are rejected with a localized help hint and are not saved as notes.
+- `/now <text>` — save and atomically claim the raw manager note, then synchronously structure it through the reusable LLM enrichment flow and return the structured response.
 - `/open` — show open loops created only by explicit `/now` processing.
 - `/done <action_id>` — mark an open loop as done.
 - `/daily` — generate today’s manager digest from raw notes and cache the response without creating actions or people notes.
@@ -163,4 +168,14 @@ Incoming authorized Telegram text messages are claimed in a persistent PostgreSQ
 
 `telegram_update_id` is unique, with an additional `(telegram_chat_id, telegram_message_id)` unique index as a message-level fallback. Duplicate updates that are already `processed` or currently `processing` are skipped without rerunning service logic, calling the LLM, mutating domain tables, or sending another Telegram response. Failed updates can be reclaimed until the built-in attempt cap is reached; `processing` updates older than `TELEGRAM_UPDATE_PROCESSING_TIMEOUT` can be reclaimed after a crash.
 
-For raw note capture and `/done`, the domain mutation and `processed` marker are committed in one short database transaction after the update has been claimed. `/now` first commits the raw note together with the Telegram `processed` marker, then runs note enrichment through a separate note lifecycle (`pending`, `processing`, `processed`, `failed`). This prevents Telegram redelivery from repeatedly calling the LLM after the raw note is durably captured. The LLM HTTP request is outside database transactions; enrichment persistence uses a short transaction that replaces generated actions and people notes owned by that note. Read-only commands and validation responses are marked processed before sending the Telegram response. If the database commit succeeds but sending the Telegram response fails, the update remains processed and automatic replay is intentionally skipped; domain correctness is preferred over response resend for this MVP.
+For raw note capture and `/done`, the domain mutation and `processed` marker are committed in one short database transaction after the update has been claimed. `/note` and plain text only save raw `pending` notes; they never call the LLM in the Telegram handler. `/now` creates the note directly in `processing` with an active enrichment claim before calling the LLM, so the background worker cannot claim that note between creation and synchronous enrichment. The LLM HTTP request is outside database transactions; enrichment persistence uses a short transaction that replaces generated actions and people notes owned by that note. Read-only commands and validation responses are marked processed before sending the Telegram response. If the database commit succeeds but sending the Telegram response fails, the update remains processed and automatic replay is intentionally skipped; domain correctness is preferred over response resend for this MVP.
+
+### Background note enrichment
+
+The note enrichment worker uses the `notes` table as a PostgreSQL-backed queue; there is no Redis, Kafka, RabbitMQ, `LISTEN/NOTIFY`, or separate queue table. Each poll atomically claims a bounded batch with `FOR UPDATE SKIP LOCKED`, ordered by `next_processing_at`, `created_at`, and `id`, then marks each claimed note `processing` and increments `processing_attempts`. Multiple app instances can run workers safely because PostgreSQL row locks and the `processing` status are the ownership source of truth.
+
+The worker processes `pending` notes, `failed` notes whose `next_processing_at` is due, and stale `processing` notes older than `NOTE_ENRICHMENT_PROCESSING_TIMEOUT`. It skips `processed` notes, fresh `processing` notes, notes delayed until a future retry time, and notes that have reached `NOTE_ENRICHMENT_MAX_ATTEMPTS`. A successful enrichment clears retry metadata and marks the note `processed`. Failed jobs use fixed backoff by active attempt: about 1 minute after attempt 1, 5 minutes after attempt 2, and 30 minutes after later retryable attempts. At the configured max attempts the note remains `failed` with no `next_processing_at`, preventing infinite automatic LLM calls while still leaving explicit retry/reprocess service methods available.
+
+If `/now` enrichment fails, the saved note remains in the same lifecycle and can be retried later by the background worker without sending another Telegram response. This preserves `/now` as the only synchronous structured-response flow while allowing transient LLM or database failures to recover.
+
+Failure windows are intentionally simple: a crash after claim but before the LLM leaves the note `processing` until stale reclaim; a crash after LLM but before persistence can call the LLM again after stale reclaim; a crash after the persistence commit leaves the note `processed`, and later workers skip it. LLM timeouts mark the note `failed` and schedule retry. If the database is unavailable during polling, the worker logs the error and waits for the next poll interval instead of busy looping or stopping the process.

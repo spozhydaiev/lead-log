@@ -49,3 +49,35 @@ func TestEnrichmentPersistenceUsesNoteScopedReplaceStrategy(t *testing.T) {
 		}
 	}
 }
+
+func TestBackgroundEnrichmentQueueUsesPostgresClaimSemantics(t *testing.T) {
+	content, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatalf("read store.go: %v", err)
+	}
+	source := strings.ToLower(string(content))
+	for _, required := range []string{
+		"func (s *store) claimnextnotesforenrichment",
+		"for update skip locked",
+		"processing_attempts < $1",
+		"next_processing_at",
+		"order by coalesce(next_processing_at, created_at), id",
+
+		"createandclaimnoteforenrichment",
+		"schedulenoteenrichmentretry",
+		"marknoteenrichmentpermanentlyfailed",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("background enrichment queue SQL missing %q", required)
+		}
+	}
+
+	migration, err := os.ReadFile("../../../migrations/010_add_note_next_processing_at.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	migrationSQL := strings.ToLower(string(migration))
+	if !strings.Contains(migrationSQL, "add column if not exists next_processing_at") || !strings.Contains(migrationSQL, "idx_notes_enrichment_queue") {
+		t.Fatalf("next_processing_at migration missing queue column/index")
+	}
+}
