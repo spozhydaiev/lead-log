@@ -65,6 +65,56 @@ func (s *Service) EnsureUser(ctx context.Context, telegramUserID int64, username
 	return s.store.UpsertUser(ctx, telegramUserID, username)
 }
 
+func (s *Service) ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error) {
+	return s.store.ClaimTelegramUpdate(ctx, meta, staleAfter)
+}
+
+func (s *Service) MarkTelegramUpdateProcessed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time) error {
+	return s.store.MarkTelegramUpdateProcessed(ctx, meta, startedAt)
+}
+
+func (s *Service) MarkTelegramUpdateFailed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time, cause error) error {
+	return s.store.MarkTelegramUpdateFailed(ctx, meta, startedAt, cause)
+}
+
+func (s *Service) CaptureNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	noteID, err := s.store.SaveRawNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
+	if err != nil {
+		return "", fmt.Errorf("capture.save_raw_note: %w", err)
+	}
+	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "user_id", userID, "note_id", noteID, "note_length", len(raw))
+	return s.language.CommonMessages().SavedRaw, nil
+}
+
+func (s *Service) AddNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	s.logger.Info("immediate processing started", "operation", "now.process", "user_id", userID, "note_length", len(raw))
+	s.logger.Info("LLM call started", "operation", "parse_note", "user_id", userID)
+	parsed, err := s.llm.ParseManagerNote(ctx, raw)
+	if err != nil {
+		s.logger.Error("command failed", "operation", "parse_note", "user_id", userID, "error", err)
+		return "", fmt.Errorf("now.llm_request: %w", err)
+	}
+	s.logger.Info("LLM call completed", "operation", "parse_note", "user_id", userID, "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed))
+	noteID, err := s.store.SaveParsedNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, parsed, meta, startedAt)
+	if err != nil {
+		s.logger.Error("persistence failed", "operation", "now.persistence", "user_id", userID, "error", err)
+		return "", fmt.Errorf("now.persistence: %w", err)
+	}
+	s.logger.Info("persistence completed", "operation", "now.persistence", "user_id", userID, "note_id", noteID)
+	return formatParsedNote(noteID, parsed, s.language), nil
+}
+
+func (s *Service) DoneForTelegramUpdate(ctx context.Context, userID int64, arg string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
+	if err != nil {
+		return s.language.CommonMessages().DoneUsage, s.store.MarkTelegramUpdateProcessed(ctx, meta, startedAt)
+	}
+	if err := s.store.MarkActionDoneAndMarkTelegramUpdateProcessed(ctx, userID, id, meta, startedAt); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(s.language.CommonMessages().DoneMarked, id), nil
+}
+
 func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
 	noteID, err := s.store.SaveRawNote(ctx, userID, raw)
 	if err != nil {
