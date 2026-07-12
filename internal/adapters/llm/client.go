@@ -185,6 +185,13 @@ Language rules:
 - Do not translate or transliterate person names freely.
 - Use canonical display names from Known people when a match exists.
 
+People highlight classification rules:
+- type and theme are separate fields with separate allowed values.
+- type is the highlight kind and must be one of: positive_signal, concern, follow_up_needed, growth_topic, context, commitment, risk.
+- theme is the work/topic area and must be one of: communication, ownership, delivery, collaboration, technical_quality, reliability, hiring, release, process, other.
+- Never put a type value such as growth_topic or positive_signal in the theme field.
+- If no listed theme is clearly supported by the notes, use theme "other". Do not invent a theme.
+
 Return valid JSON only with this exact shape. Use empty arrays for empty sections and null for missing owner/due_hint:
 {
   "short_summary": "short neutral Ukrainian summary",
