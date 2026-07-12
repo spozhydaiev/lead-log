@@ -74,3 +74,38 @@ func TestNowStillSavesParsedStructuredItems(t *testing.T) {
 		}
 	}
 }
+
+func TestDailyAtZeroNotesReturnsBeforeLLMCall(t *testing.T) {
+	content, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
+	}
+	dailyStart := strings.Index(string(content), "func (s *Service) DailyAtDate")
+	weeklyStart := strings.Index(string(content), "func (s *Service) Weekly")
+	if dailyStart < 0 || weeklyStart < 0 || weeklyStart <= dailyStart {
+		t.Fatalf("could not locate DailyAtDate function body")
+	}
+	dailyBody := string(content)[dailyStart:weeklyStart]
+	zeroNotes := strings.Index(dailyBody, "strings.TrimSpace(source) == \"\"")
+	llmCall := strings.Index(dailyBody, "ProcessDaily")
+	if zeroNotes < 0 || llmCall < 0 || zeroNotes > llmCall {
+		t.Fatalf("DailyAtDate must return on zero notes before calling the LLM")
+	}
+}
+
+func TestManualDailyStillUsesCurrentDay(t *testing.T) {
+	content, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
+	}
+	serviceSource := string(content)
+	dailyStart := strings.Index(serviceSource, "func (s *Service) Daily(ctx")
+	dailyAtStart := strings.Index(serviceSource, "func (s *Service) DailyAt(ctx")
+	if dailyStart < 0 || dailyAtStart < 0 || dailyAtStart <= dailyStart {
+		t.Fatalf("could not locate Daily function body")
+	}
+	dailyBody := serviceSource[dailyStart:dailyAtStart]
+	if !strings.Contains(dailyBody, "time.Now()") || !strings.Contains(dailyBody, "s.DailyAt(ctx, userID, time.Now(), refresh)") {
+		t.Fatalf("manual /daily must continue using the current day")
+	}
+}

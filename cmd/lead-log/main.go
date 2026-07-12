@@ -29,6 +29,7 @@ func main() {
 		"daily_summary_enabled", cfg.DailySummaryEnabled,
 		"daily_summary_time", cfg.DailySummaryTime,
 		"daily_summary_timezone", cfg.DailySummaryTimezone,
+		"daily_summary_mode", cfg.DailySummaryMode,
 		"log_level", cfg.LogLevel,
 		"log_format", cfg.LogFormat,
 		"response_language", string(cfg.ResponseLanguage),
@@ -60,7 +61,7 @@ func main() {
 	}
 
 	if cfg.DailySummaryEnabled {
-		dailyScheduler, err := scheduler.NewDailySummary(st, service, telegramBot, cfg.AllowedTelegramUserIDs, cfg.DailySummaryTime, cfg.DailySummaryLocation, logger.With("component", "scheduler"))
+		dailyScheduler, err := scheduler.NewDailySummary(st, service, telegramBot, cfg.AllowedTelegramUserIDs, cfg.DailySummaryTime, cfg.DailySummaryLocation, scheduler.SummaryMode(cfg.DailySummaryMode), logger.With("component", "scheduler"))
 		if err != nil {
 			logger.Error("daily summary scheduler initialization failed", "component", "scheduler", "operation", "scheduler.init", "error", err)
 			os.Exit(1)
