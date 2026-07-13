@@ -47,3 +47,26 @@ func TestRetrievalMigrationAddsTargetedIndexes(t *testing.T) {
 		}
 	}
 }
+
+func TestTicketRetrievalQueriesAreScopedAndBounded(t *testing.T) {
+	content, err := os.ReadFile("retrieval.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.ToLower(string(content))
+	for _, required := range []string{
+		"getticketmentionbounds",
+		"searchticketfallbacknotes",
+		"listactionsbysourcenoteids",
+		"listdecisionsbysourcenoteids",
+		"em.user_id=$1 and em.entity_type=$2 and em.normalized_value=$3",
+		"where user_id=$1 and (raw_text ~* $2",
+		"where a.user_id=$1 and a.note_id=any($2::bigint[])",
+		"where d.user_id=$1 and d.note_id=any($2::bigint[])",
+		"limit $3",
+	} {
+		if !strings.Contains(s, required) {
+			t.Fatalf("ticket retrieval SQL missing %q", required)
+		}
+	}
+}

@@ -51,6 +51,7 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		"/daily --refresh — regenerate the daily digest",
 		"/weekly --refresh — regenerate the weekly digest",
 		"/ask <question> — ask about your saved work history with source notes",
+		"/ticket <ticket-key> — show deterministic ticket history from your notes",
 		"regular text without /note",
 	} {
 		if !strings.Contains(help, want) {
@@ -58,7 +59,7 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		}
 	}
 
-	for _, removed := range []string{"/person", "/agenda", "/review", "/alias", "/merge", "/ticket"} {
+	for _, removed := range []string{"/person", "/agenda", "/review", "/alias", "/merge"} {
 		if strings.Contains(help, removed) {
 			t.Fatalf("help text still exposes %q\n%s", removed, help)
 		}
@@ -107,6 +108,37 @@ func TestHandleMessageAskDuplicateSkipsLLMAndReply(t *testing.T) {
 		t.Fatalf("Ask calls=%d, want 1", fake.askCalls)
 	}
 	if len(replies) != 1 || replies[0] != "answer" {
+		t.Fatalf("replies=%#v", replies)
+	}
+}
+
+func TestHandleMessageTicketRoutesToTicketService(t *testing.T) {
+	fake := &fakeBotService{ticketResponse: "ticket answer"}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(100, "/ticket@LeadLogBot CH-1234"), func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.ticketCalls != 1 || fake.lastTicketArg != "CH-1234" {
+		t.Fatalf("Ticket calls/arg = %d/%q", fake.ticketCalls, fake.lastTicketArg)
+	}
+	if fake.captureCalls != 0 || fake.addCalls != 0 || fake.askCalls != 0 {
+		t.Fatalf("/ticket must not capture/enrich/ask: capture=%d add=%d ask=%d", fake.captureCalls, fake.addCalls, fake.askCalls)
+	}
+	if len(replies) != 1 || replies[0] != "ticket answer" {
+		t.Fatalf("replies=%#v", replies)
+	}
+}
+
+func TestHandleMessageTicketDuplicateSkipsRetrievalAndReply(t *testing.T) {
+	fake := &fakeBotService{ticketResponse: "ticket answer", claims: []store.TelegramUpdateClaim{{Claimed: true, Status: store.TelegramUpdateStatusProcessing, AttemptCount: 1, ProcessingStartedAt: time.Now()}, {Claimed: false, Status: store.TelegramUpdateStatusProcessed, AttemptCount: 1}}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	msg := testMessage(100, "/ticket ch-1234")
+	b.handleMessageWithUpdateAndReply(testContext(), 559, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	b.handleMessageWithUpdateAndReply(testContext(), 559, msg, func(chatID int64, text string) { replies = append(replies, text) })
+	if fake.ticketCalls != 1 {
+		t.Fatalf("Ticket calls=%d, want 1", fake.ticketCalls)
+	}
+	if len(replies) != 1 || replies[0] != "ticket answer" {
 		t.Fatalf("replies=%#v", replies)
 	}
 }
@@ -273,6 +305,9 @@ type fakeBotService struct {
 	askCalls        int
 	askResponse     string
 	lastQuestion    string
+	ticketCalls     int
+	lastTicketArg   string
+	ticketResponse  string
 }
 
 func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -320,6 +355,14 @@ func (f *fakeBotService) Ask(ctx context.Context, userID int64, question string)
 		return f.askResponse, nil
 	}
 	return "", nil
+}
+func (f *fakeBotService) Ticket(ctx context.Context, userID int64, arg string) (string, error) {
+	f.ticketCalls++
+	f.lastTicketArg = arg
+	if f.ticketResponse != "" {
+		return f.ticketResponse, nil
+	}
+	return "ticket", nil
 }
 func (f *fakeBotService) ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error) {
 	if len(f.claims) > 0 {
