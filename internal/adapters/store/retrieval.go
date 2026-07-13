@@ -165,3 +165,88 @@ func boundedStoreLimit(n int) int {
 	}
 	return n
 }
+
+type TicketMentionBounds struct {
+	First *time.Time
+	Last  *time.Time
+}
+
+func (s *Store) GetTicketMentionBounds(ctx context.Context, userID int64, normalizedKey string) (TicketMentionBounds, error) {
+	var first, last *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT min(n.created_at), max(n.created_at) FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type=$2 AND em.normalized_value=$3`, userID, models.EntityTypeTicket, normalizedKey).Scan(&first, &last)
+	if err != nil {
+		return TicketMentionBounds{}, err
+	}
+	return TicketMentionBounds{First: first, Last: last}, nil
+}
+
+func (s *Store) SearchTicketFallbackNotes(ctx context.Context, userID int64, normalizedKey string, limit int) ([]models.RetrievalItem, error) {
+	limit = boundedStoreLimit(limit)
+	pattern := `(^|[^A-Za-z0-9-])` + normalizedKey + `([^A-Za-z0-9-]|$)`
+	rows, err := s.pool.Query(ctx, `SELECT id,user_id,created_at,raw_text,COALESCE(summary,'') FROM notes WHERE user_id=$1 AND (raw_text ~* $2 OR COALESCE(summary,'') ~* $2) ORDER BY created_at DESC LIMIT $3`, userID, pattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.RetrievalItem
+	for rows.Next() {
+		var id, uid int64
+		var created time.Time
+		var raw, summary string
+		if err := rows.Scan(&id, &uid, &created, &raw, &summary); err != nil {
+			return nil, err
+		}
+		text := raw
+		if strings.TrimSpace(summary) != "" {
+			text = summary + "\n" + raw
+		}
+		out = append(out, models.RetrievalItem{Kind: models.RetrievalKindNote, RecordID: id, SourceNoteID: id, UserID: uid, CreatedAt: created, Title: "Note", Text: models.RetrievalSnippet(text, normalizedKey, 240), Score: 70})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListActionsBySourceNoteIDs(ctx context.Context, userID int64, noteIDs []int64, limit int) ([]models.RetrievalItem, error) {
+	if len(noteIDs) == 0 {
+		return []models.RetrievalItem{}, nil
+	}
+	limit = boundedStoreLimit(limit)
+	rows, err := s.pool.Query(ctx, `SELECT a.id,a.user_id,COALESCE(a.note_id,0),COALESCE(n.created_at,a.created_at),a.title,a.status,COALESCE(p.name,'') FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.note_id=ANY($2::bigint[]) ORDER BY COALESCE(n.created_at,a.created_at) DESC, a.id DESC LIMIT $3`, userID, noteIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.RetrievalItem
+	for rows.Next() {
+		var it models.RetrievalItem
+		if err := rows.Scan(&it.RecordID, &it.UserID, &it.SourceNoteID, &it.CreatedAt, &it.Title, &it.Status, &it.PersonName); err != nil {
+			return nil, err
+		}
+		it.Kind = models.RetrievalKindAction
+		it.Text = models.RetrievalSnippet(it.Title, "", 240)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListDecisionsBySourceNoteIDs(ctx context.Context, userID int64, noteIDs []int64, limit int) ([]models.RetrievalItem, error) {
+	if len(noteIDs) == 0 {
+		return []models.RetrievalItem{}, nil
+	}
+	limit = boundedStoreLimit(limit)
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.user_id,d.note_id,COALESCE(n.created_at,d.created_at),d.text,COALESCE(d.topic,'Decision'),d.status FROM decisions d JOIN notes n ON n.id=d.note_id AND n.user_id=d.user_id WHERE d.user_id=$1 AND d.note_id=ANY($2::bigint[]) ORDER BY COALESCE(n.created_at,d.created_at) DESC, d.id DESC LIMIT $3`, userID, noteIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.RetrievalItem
+	for rows.Next() {
+		var it models.RetrievalItem
+		if err := rows.Scan(&it.RecordID, &it.UserID, &it.SourceNoteID, &it.CreatedAt, &it.Text, &it.Title, &it.Status); err != nil {
+			return nil, err
+		}
+		it.Kind = models.RetrievalKindDecision
+		it.Text = models.RetrievalSnippet(it.Text, "", 240)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}

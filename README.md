@@ -158,6 +158,8 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 - `/daily --refresh` — regenerate today’s digest/cache without creating actions or people notes.
 - `/weekly` — generate a digest for the last 7 days.
 - `/weekly --refresh` — regenerate the weekly digest instead of using cache.
+- `/ask <question>` — ask about saved work history with source-backed answers.
+- `/ticket <ticket-key>` — show deterministic ticket history from exact ticket mentions and bounded raw-note fallback; no Jira/API/LLM lookup is used.
 
 Out of MVP scope for now: person context, 1:1 agenda generation, performance review packs, Jira integration, calendar integration, monitoring integrations, voice transcription, web UI, multi-user workspaces, and billing. Existing database tables and migrations for older data are left in place for backward compatibility.
 

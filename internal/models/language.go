@@ -82,41 +82,54 @@ func (l ResponseLanguage) NowLabels() NowLabels {
 }
 
 type CommonMessages struct {
-	SavedRaw           string
-	NoOpenActions      string
-	OpenActionsHeader  string
-	DoneUsage          string
-	DoneMarked         string
-	NoNotesToday       string
-	NoNotesLast7Days   string
-	DailyCachedNotice  string
-	WeeklyCachedNotice string
-	EmptySendFallback  string
-	UnsupportedText    string
-	AccessDenied       string
-	UserInitFailed     string
-	HelpText           string
-	NoteUsage          string
-	UnknownCommand     string
-	GenericError       string
-	AskUsage           string
-	AskNoResults       string
-	AskTooLong         string
+	SavedRaw                string
+	NoOpenActions           string
+	OpenActionsHeader       string
+	DoneUsage               string
+	DoneMarked              string
+	NoNotesToday            string
+	NoNotesLast7Days        string
+	DailyCachedNotice       string
+	WeeklyCachedNotice      string
+	EmptySendFallback       string
+	UnsupportedText         string
+	AccessDenied            string
+	UserInitFailed          string
+	HelpText                string
+	NoteUsage               string
+	UnknownCommand          string
+	GenericError            string
+	AskUsage                string
+	AskNoResults            string
+	AskTooLong              string
+	TicketUsage             string
+	TicketInvalid           string
+	TicketNoResults         string
+	TicketLastMentioned     string
+	TicketFirstMentioned    string
+	TicketKnownStatus       string
+	TicketStatusNotRecorded string
+	TicketRecentMentions    string
+	TicketRelatedActions    string
+	TicketDecisions         string
+	TicketSources           string
+	TicketDirect            string
+	TicketPossible          string
 }
 
 func (l ResponseLanguage) CommonMessages() CommonMessages {
 	switch l {
 	case LanguageUkrainian:
 		return CommonMessages{
-			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp, NoteUsage: "Використання: /note <текст>", UnknownCommand: "Невідома команда. Використайте /help, щоб побачити доступні команди.", GenericError: "Щось пішло не так. Спробуйте пізніше.", AskUsage: "Використання: /ask <question>", AskNoResults: "Я не знайшов у нотатках достатнього контексту для відповіді. Спробуй уточнити людину, тікет або період.", AskTooLong: "Питання занадто довге. Спробуй коротше формулювання.",
+			SavedRaw: "Збережено в нотатки за сьогодні.", NoOpenActions: "Відкритих дій немає 🎉", OpenActionsHeader: "Відкриті дії:", DoneUsage: "Використання: /done <action_id>", DoneMarked: "Позначено дію %d як виконану.", NoNotesToday: "За сьогодні нотаток немає.", NoNotesLast7Days: "Немає нотаток за останні 7 днів.", DailyCachedNotice: "_з кешу. Використайте /daily --refresh, щоб згенерувати заново._", WeeklyCachedNotice: "_з кешу. Використайте /weekly --refresh, щоб згенерувати заново._", EmptySendFallback: "Готово.", UnsupportedText: "Надішліть текстову нотатку або використайте /note <текст>.", AccessDenied: "Доступ заборонено.", UserInitFailed: "Не вдалося ініціалізувати користувача.", HelpText: ukHelp, NoteUsage: "Використання: /note <текст>", UnknownCommand: "Невідома команда. Використайте /help, щоб побачити доступні команди.", GenericError: "Щось пішло не так. Спробуйте пізніше.", AskUsage: "Використання: /ask <question>", AskNoResults: "Я не знайшов у нотатках достатнього контексту для відповіді. Спробуй уточнити людину, тікет або період.", AskTooLong: "Питання занадто довге. Спробуй коротше формулювання.", TicketUsage: "Використання: /ticket <ticket-key>", TicketInvalid: "Некоректний ключ тікета. Приклад: CH-1234", TicketNoResults: "Я не знайшов %s у твоїх нотатках. Спробуй перевірити ключ тікета або спершу згадати його в нотатці.", TicketLastMentioned: "Остання згадка", TicketFirstMentioned: "Перша згадка", TicketKnownStatus: "Відомий статус", TicketStatusNotRecorded: "не зафіксовано", TicketRecentMentions: "Останні згадки", TicketRelatedActions: "Пов’язані дії", TicketDecisions: "Рішення", TicketSources: "Джерела", TicketDirect: "прямо пов’язано", TicketPossible: "можливо пов’язано",
 		}
 	case LanguagePolish:
 		return CommonMessages{
-			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp, NoteUsage: "Użycie: /note <tekst>", UnknownCommand: "Nieznane polecenie. Użyj /help, aby zobaczyć dostępne polecenia.", GenericError: "Coś poszło nie tak. Spróbuj ponownie później.", AskUsage: "Użycie: /ask <question>", AskNoResults: "Nie znalazłem w notatkach wystarczającego kontekstu do odpowiedzi. Spróbuj doprecyzować osobę, ticket albo okres.", AskTooLong: "Pytanie jest za długie. Spróbuj krótszego sformułowania.",
+			SavedRaw: "Zapisano w dzisiejszych notatkach.", NoOpenActions: "Brak otwartych działań 🎉", OpenActionsHeader: "Otwarte działania:", DoneUsage: "Użycie: /done <action_id>", DoneMarked: "Oznaczono działanie %d jako wykonane.", NoNotesToday: "Brak notatek na dziś.", NoNotesLast7Days: "Brak notatek z ostatnich 7 dni.", DailyCachedNotice: "_z pamięci podręcznej. Użyj /daily --refresh, aby wygenerować ponownie._", WeeklyCachedNotice: "_z pamięci podręcznej. Użyj /weekly --refresh, aby wygenerować ponownie._", EmptySendFallback: "Gotowe.", UnsupportedText: "Wyślij notatkę tekstową albo użyj /note <tekst>.", AccessDenied: "Odmowa dostępu.", UserInitFailed: "Nie udało się zainicjować użytkownika.", HelpText: plHelp, NoteUsage: "Użycie: /note <tekst>", UnknownCommand: "Nieznane polecenie. Użyj /help, aby zobaczyć dostępne polecenia.", GenericError: "Coś poszło nie tak. Spróbuj ponownie później.", AskUsage: "Użycie: /ask <question>", AskNoResults: "Nie znalazłem w notatkach wystarczającego kontekstu do odpowiedzi. Spróbuj doprecyzować osobę, ticket albo okres.", AskTooLong: "Pytanie jest za długie. Spróbuj krótszego sformułowania.", TicketUsage: "Użycie: /ticket <ticket-key>", TicketInvalid: "Nieprawidłowy klucz ticketa. Przykład: CH-1234", TicketNoResults: "Nie znalazłem %s w Twoich notatkach. Sprawdź klucz ticketa albo najpierw wspomnij go w notatce.", TicketLastMentioned: "Ostatnia wzmianka", TicketFirstMentioned: "Pierwsza wzmianka", TicketKnownStatus: "Znany status", TicketStatusNotRecorded: "nie zapisano", TicketRecentMentions: "Ostatnie wzmianki", TicketRelatedActions: "Powiązane działania", TicketDecisions: "Decyzje", TicketSources: "Źródła", TicketDirect: "bezpośrednio powiązane", TicketPossible: "możliwie powiązane",
 		}
 	default:
 		return CommonMessages{
-			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp, NoteUsage: "Usage: /note <text>", UnknownCommand: "Unknown command. Use /help to see available commands.", GenericError: "Something went wrong. Please try again later.", AskUsage: "Usage: /ask <question>", AskNoResults: "I could not find enough context in your notes to answer. Try specifying a person, ticket, or date range.", AskTooLong: "The question is too long. Try a shorter wording.",
+			SavedRaw: "Saved to today's notes.", NoOpenActions: "No open actions 🎉", OpenActionsHeader: "Open actions:", DoneUsage: "Usage: /done <action_id>", DoneMarked: "Marked action %d as done.", NoNotesToday: "No notes for today.", NoNotesLast7Days: "No notes for the last 7 days.", DailyCachedNotice: "_cached. Use /daily --refresh to regenerate._", WeeklyCachedNotice: "_cached. Use /weekly --refresh to regenerate._", EmptySendFallback: "Done.", UnsupportedText: "Send a text note or use /note <text>.", AccessDenied: "Access denied.", UserInitFailed: "Failed to initialize user.", HelpText: enHelp, NoteUsage: "Usage: /note <text>", UnknownCommand: "Unknown command. Use /help to see available commands.", GenericError: "Something went wrong. Please try again later.", AskUsage: "Usage: /ask <question>", AskNoResults: "I could not find enough context in your notes to answer. Try specifying a person, ticket, or date range.", AskTooLong: "The question is too long. Try a shorter wording.", TicketUsage: "Usage: /ticket <ticket-key>", TicketInvalid: "Invalid ticket key. Example: CH-1234", TicketNoResults: "I could not find %s in your notes. Try checking the ticket key or mentioning it in a note first.", TicketLastMentioned: "Last mentioned", TicketFirstMentioned: "First mentioned", TicketKnownStatus: "Known status", TicketStatusNotRecorded: "not recorded", TicketRecentMentions: "Recent mentions", TicketRelatedActions: "Related actions", TicketDecisions: "Decisions", TicketSources: "Sources", TicketDirect: "directly related", TicketPossible: "possibly related",
 		}
 	}
 }
@@ -133,6 +146,7 @@ Commands:
 /weekly — weekly digest for the last 7 days
 /weekly --refresh — regenerate the weekly digest
 /ask <question> — ask about your saved work history with source notes
+/ticket <ticket-key> — show deterministic ticket history from your notes
 
 Tip: you can send regular text without /note. It will be saved as a raw note for /daily.`
 
@@ -148,6 +162,7 @@ const ukHelp = `LeadLog Bot
 /weekly — тижневий дайджест за останні 7 днів
 /weekly --refresh — згенерувати тижневий дайджест заново
 /ask <question> — запитати про збережену робочу історію з джерелами
+/ticket <ticket-key> — показати історію тікета з нотаток
 
 Порада: можна надіслати звичайний текст без /note. Він збережеться як сира нотатка для /daily.`
 
@@ -163,5 +178,6 @@ Polecenia:
 /weekly — tygodniowy digest z ostatnich 7 dni
 /weekly --refresh — wygeneruj tygodniowy digest ponownie
 /ask <question> — zapytaj o zapisaną historię pracy ze źródłami
+/ticket <ticket-key> — pokaż historię ticketa z notatek
 
 Wskazówka: możesz wysłać zwykły tekst bez /note. Zostanie zapisany jako surowa notatka dla /daily.`
