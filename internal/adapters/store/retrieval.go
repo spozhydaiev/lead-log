@@ -3,19 +3,21 @@ package store
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
 const RetrievalPerSourceLimit = 50
 
 type ResolvedPerson struct {
-	ID    int64
-	Name  string
-	Found bool
+	ID           int64
+	Name         string
+	MatchedAlias string
+	Found        bool
+	Ambiguous    bool
 }
 
 type RetrievalFilters struct {
@@ -34,24 +36,53 @@ func (s *Store) ResolvePerson(ctx context.Context, userID int64, name string) (R
 	if userID <= 0 || norm == "" {
 		return ResolvedPerson{}, nil
 	}
-	var p ResolvedPerson
-	err := s.pool.QueryRow(ctx, `SELECT p.id, p.name FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id WHERE pa.user_id=$1 AND pa.normalized_alias=$2 LIMIT 1`, userID, norm).Scan(&p.ID, &p.Name)
-	if err == nil {
-		p.Found = true
-		return p, nil
-	}
-	if err != pgx.ErrNoRows {
-		return p, err
-	}
-	err = s.pool.QueryRow(ctx, `SELECT id, name FROM people WHERE user_id=$1 AND lower(regexp_replace(trim(name), '\s+', ' ', 'g'))=$2 LIMIT 1`, userID, norm).Scan(&p.ID, &p.Name)
-	if err == pgx.ErrNoRows {
-		return ResolvedPerson{}, nil
-	}
+	rows, err := s.pool.Query(ctx, `SELECT p.id, p.name, pa.alias FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id WHERE pa.user_id=$1 AND pa.normalized_alias=$2 LIMIT 2`, userID, norm)
 	if err != nil {
 		return ResolvedPerson{}, err
 	}
-	p.Found = true
-	return p, nil
+	defer rows.Close()
+	var matches []ResolvedPerson
+	for rows.Next() {
+		var p ResolvedPerson
+		if err := rows.Scan(&p.ID, &p.Name, &p.MatchedAlias); err != nil {
+			return ResolvedPerson{}, err
+		}
+		p.Found = true
+		matches = append(matches, p)
+	}
+	if err := rows.Err(); err != nil {
+		return ResolvedPerson{}, err
+	}
+	if len(matches) > 1 {
+		return ResolvedPerson{Ambiguous: true}, nil
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	rows, err = s.pool.Query(ctx, `SELECT id, name FROM people WHERE user_id=$1 AND lower(regexp_replace(trim(name), '\s+', ' ', 'g'))=$2 LIMIT 2`, userID, norm)
+	if err != nil {
+		return ResolvedPerson{}, err
+	}
+	defer rows.Close()
+	matches = matches[:0]
+	for rows.Next() {
+		var p ResolvedPerson
+		if err := rows.Scan(&p.ID, &p.Name); err != nil {
+			return ResolvedPerson{}, err
+		}
+		p.Found = true
+		matches = append(matches, p)
+	}
+	if err := rows.Err(); err != nil {
+		return ResolvedPerson{}, err
+	}
+	if len(matches) > 1 {
+		return ResolvedPerson{Ambiguous: true}, nil
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	return ResolvedPerson{}, nil
 }
 
 func (s *Store) SearchNotes(ctx context.Context, userID int64, f RetrievalFilters) ([]models.RetrievalItem, error) {
@@ -247,6 +278,79 @@ func (s *Store) ListDecisionsBySourceNoteIDs(ctx context.Context, userID int64, 
 		it.Kind = models.RetrievalKindDecision
 		it.Text = models.RetrievalSnippet(it.Text, "", 240)
 		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListPersonAliases(ctx context.Context, userID, personID int64, limit int) ([]string, error) {
+	limit = boundedStoreLimit(limit)
+	rows, err := s.pool.Query(ctx, `SELECT alias FROM person_aliases WHERE user_id=$1 AND person_id=$2 ORDER BY created_at DESC LIMIT $3`, userID, personID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetPersonLastMention(ctx context.Context, userID, personID int64) (*time.Time, error) {
+	var t *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT max(at) FROM (
+		SELECT COALESCE(n.created_at,pn.created_at) at FROM people_notes pn LEFT JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id WHERE pn.user_id=$1 AND pn.person_id=$2
+		UNION ALL SELECT COALESCE(n.created_at,a.created_at) at FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id WHERE a.user_id=$1 AND a.linked_person_id=$2
+		UNION ALL SELECT COALESCE(n.created_at,d.created_at) at FROM decisions d LEFT JOIN notes n ON n.id=d.note_id AND n.user_id=d.user_id WHERE d.user_id=$1 AND d.linked_person_id=$2
+	) x`, userID, personID).Scan(&t)
+	return t, err
+}
+
+func (s *Store) CountPersonMentionsSince(ctx context.Context, userID, personID int64, since time.Time) (int, error) {
+	var c int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM (
+		SELECT pn.id FROM people_notes pn LEFT JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id WHERE pn.user_id=$1 AND pn.person_id=$2 AND COALESCE(n.created_at,pn.created_at)>=$3
+		UNION ALL SELECT a.id FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id WHERE a.user_id=$1 AND a.linked_person_id=$2 AND COALESCE(n.created_at,a.created_at)>=$3
+		UNION ALL SELECT d.id FROM decisions d LEFT JOIN notes n ON n.id=d.note_id AND n.user_id=d.user_id WHERE d.user_id=$1 AND d.linked_person_id=$2 AND COALESCE(n.created_at,d.created_at)>=$3
+	) x`, userID, personID, since).Scan(&c)
+	return c, err
+}
+
+func (s *Store) SearchRecentNotesByAliases(ctx context.Context, userID int64, aliases []string, since time.Time, limit int) ([]models.RetrievalItem, error) {
+	limit = boundedStoreLimit(limit)
+	patterns := make([]string, 0, len(aliases))
+	for _, a := range aliases {
+		a = models.NormalizeSpace(a)
+		if len([]rune(a)) < 4 {
+			continue
+		}
+		patterns = append(patterns, `(^|[^[:alnum:]_])`+regexp.QuoteMeta(a)+`([^[:alnum:]_]|$)`)
+	}
+	if len(patterns) == 0 {
+		return []models.RetrievalItem{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,user_id,created_at,raw_text,COALESCE(summary,'') FROM notes WHERE user_id=$1 AND created_at>=$2 AND (raw_text ~* ANY($3::text[]) OR COALESCE(summary,'') ~* ANY($3::text[])) ORDER BY created_at DESC LIMIT $4`, userID, since, patterns, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.RetrievalItem
+	for rows.Next() {
+		var id, uid int64
+		var created time.Time
+		var raw, summary string
+		if err := rows.Scan(&id, &uid, &created, &raw, &summary); err != nil {
+			return nil, err
+		}
+		text := raw
+		if strings.TrimSpace(summary) != "" {
+			text = summary + "\n" + raw
+		}
+		out = append(out, models.RetrievalItem{Kind: models.RetrievalKindNote, RecordID: id, SourceNoteID: id, UserID: uid, CreatedAt: created, Title: "Note", Text: models.RetrievalSnippet(text, "", 240)})
 	}
 	return out, rows.Err()
 }
