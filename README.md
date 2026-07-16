@@ -181,3 +181,15 @@ The worker processes `pending` notes, `failed` notes whose `next_processing_at` 
 If `/now` enrichment fails, the saved note remains in the same lifecycle and can be retried later by the background worker without sending another Telegram response. This preserves `/now` as the only synchronous structured-response flow while allowing transient LLM or database failures to recover.
 
 Failure windows are intentionally simple: a crash after claim but before the LLM leaves the note `processing` until stale reclaim; a crash after LLM but before persistence can call the LLM again after stale reclaim; a crash after the persistence commit leaves the note `processed`, and later workers skip it. LLM timeouts mark the note `failed` and schedule retry. If the database is unavailable during polling, the worker logs the error and waits for the next poll interval instead of busy looping or stopping the process.
+
+## Logging and privacy
+
+Production logs are intentionally operational-only. Runtime logs must not include Telegram identifiers, usernames, internal user or record IDs, person names, aliases, ticket keys, entity values, raw notes, questions, summaries, action/decision/people-note text, retrieval snippets, LLM prompts, LLM responses, HTTP bodies, database URLs, API keys, tokens, authorization headers, or raw provider/database error bodies.
+
+Allowed log fields are limited to diagnostic metadata such as component, operation, failure stage, status/result, safe counters, durations, model name, prompt version, cache hit/miss, worker attempt number, batch size, HTTP status, error class, sanitized error message, and operation-scoped correlation IDs.
+
+Each incoming Telegram operation or background job receives a random `operation_id`. It is generated from random bytes, is scoped to a single operation, is not derived from user/chat/message/note IDs, and is not stored as a stable user identifier. Related service, store, worker, scheduler, and LLM logs use this ID when available.
+
+Errors logged through the application use safe error fields. Provider HTTP error bodies and database error messages are not emitted as raw log text; logs keep stable classes such as `llm_http_error`, `database_error`, or `daily_digest_validation` plus safe operational metadata.
+
+Debug logs follow the same privacy rules as info/warn/error logs. There is no production flag that re-enables sensitive logging.

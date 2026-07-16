@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/spozhydaiev/lead-log/internal/logging"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -70,7 +72,7 @@ func New(pool *pgxpool.Pool, logger ...*slog.Logger) *Store {
 
 func (s *Store) logDBError(operation string, err error) {
 	if err != nil {
-		s.logger.Error("database error", "operation", operation, "error", err)
+		s.logger.Error("database error", logging.WithSafeError([]any{"operation", operation}, err)...)
 	}
 }
 

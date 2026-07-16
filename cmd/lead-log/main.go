@@ -41,18 +41,20 @@ func main() {
 		"note_enrichment_batch_size", cfg.NoteEnrichmentBatchSize,
 		"note_enrichment_worker_concurrency", cfg.NoteEnrichmentWorkerConcurrency,
 		"note_enrichment_max_attempts", cfg.NoteEnrichmentMaxAttempts,
+		"allowlist_configured", len(cfg.AllowedTelegramUserIDs) > 0,
+		"allowlist_size", len(cfg.AllowedTelegramUserIDs),
 	)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("database connection failed", "operation", "db.connect", "error", err)
+		logger.Error("database connection failed", logging.WithSafeError([]any{"operation", "db.connect"}, err)...)
 		os.Exit(1)
 	}
 	defer pool.Close()
 	logger.Info("database connection established", "component", "db", "operation", "db.connect")
 
 	if err := db.Migrate(ctx, pool, migrations.FS, logger.With("component", "migrations")); err != nil {
-		logger.Error("migration runner failed", "component", "migrations", "operation", "db.migrate", "error", err)
+		logger.Error("migration runner failed", logging.WithSafeError([]any{"component", "migrations", "operation", "db.migrate"}, err)...)
 		os.Exit(1)
 	}
 
@@ -63,7 +65,7 @@ func main() {
 
 	telegramBot, err := bot.New(cfg, service, logger.With("component", "bot"))
 	if err != nil {
-		logger.Error("telegram bot initialization failed", "component", "bot", "operation", "bot.init", "error", err)
+		logger.Error("telegram bot initialization failed", logging.WithSafeError([]any{"component", "bot", "operation", "bot.init"}, err)...)
 		os.Exit(1)
 	}
 
@@ -75,14 +77,14 @@ func main() {
 	if cfg.DailySummaryEnabled {
 		dailyScheduler, err := scheduler.NewDailySummary(st, service, telegramBot, cfg.AllowedTelegramUserIDs, cfg.DailySummaryTime, cfg.DailySummaryLocation, scheduler.SummaryMode(cfg.DailySummaryMode), logger.With("component", "scheduler"))
 		if err != nil {
-			logger.Error("daily summary scheduler initialization failed", "component", "scheduler", "operation", "scheduler.init", "error", err)
+			logger.Error("daily summary scheduler initialization failed", logging.WithSafeError([]any{"component", "scheduler", "operation", "scheduler.init"}, err)...)
 			os.Exit(1)
 		}
 		go dailyScheduler.Run(ctx)
 	}
 
 	if err := telegramBot.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Error("bot stopped", "component", "bot", "operation", "bot.run", "error", err)
+		logger.Error("bot stopped", logging.WithSafeError([]any{"component", "bot", "operation", "bot.run"}, err)...)
 		os.Exit(1)
 	}
 }

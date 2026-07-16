@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spozhydaiev/lead-log/internal/logging"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -83,7 +85,7 @@ func (c *Client) ParseManagerNote(ctx context.Context, raw string) (models.Parse
 
 	var parsed models.ParsedNote
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		c.logger.Warn("JSON parse failure", "operation", "parse_note", "response_size", len(content), "error", err)
+		c.logger.Warn("JSON parse failure", logging.WithSafeError([]any{"operation", "parse_note", "response_byte_length", len(content)}, err)...)
 		return models.ParsedNote{}, fmt.Errorf("parse llm json: %w", err)
 	}
 	return parsed, nil
@@ -111,7 +113,7 @@ func (c *Client) PlanAskQuery(ctx context.Context, question, currentDate, timezo
 	}
 	var intent models.AskIntent
 	if err := json.Unmarshal([]byte(content), &intent); err != nil {
-		c.logger.Warn("JSON parse failure", "operation", "ask.plan", "response_size", len(content), "error", err)
+		c.logger.Warn("JSON parse failure", logging.WithSafeError([]any{"operation", "ask.plan", "response_byte_length", len(content)}, err)...)
 		return models.AskIntent{}, fmt.Errorf("parse ask intent json: %w", err)
 	}
 	return intent, nil
@@ -129,7 +131,7 @@ func (c *Client) GenerateAskAnswer(ctx context.Context, question string, intent 
 	}
 	var ans models.AskAnswer
 	if err := json.Unmarshal([]byte(content), &ans); err != nil {
-		c.logger.Warn("JSON parse failure", "operation", "ask.answer", "response_size", len(content), "error", err)
+		c.logger.Warn("JSON parse failure", logging.WithSafeError([]any{"operation", "ask.answer", "response_byte_length", len(content)}, err)...)
 		return models.AskAnswer{}, fmt.Errorf("parse ask answer json: %w", err)
 	}
 	return ans, nil
@@ -145,7 +147,7 @@ func (c *Client) chatText(ctx context.Context, operation, prompt string) (string
 
 func (c *Client) chat(ctx context.Context, operation, prompt string, format responseFormat) (string, error) {
 	started := time.Now()
-	c.logger.Info("LLM request started", "operation", operation, "model", c.model, "prompt_length", len(prompt))
+	c.logger.Info("LLM request started", "operation", operation, "operation_id", logging.OperationID(ctx), "model", c.model, "prompt_byte_length", len(prompt))
 	reqBody := chatCompletionRequest{
 		Model:          c.model,
 		Temperature:    0.1,
@@ -167,29 +169,29 @@ func (c *Client) chat(ctx context.Context, operation, prompt string, format resp
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.logger.Error("LLM request failed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		c.logger.Error("LLM request failed", logging.WithSafeError([]any{"operation", operation, "operation_id", logging.OperationID(ctx), "model", c.model, "duration_ms", time.Since(started).Milliseconds()}, err)...)
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.logger.Error("LLM request failed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody))
-		return "", fmt.Errorf("llm error status=%d", resp.StatusCode)
+		c.logger.Error("LLM request failed", "operation", operation, "operation_id", logging.OperationID(ctx), "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_byte_length", len(respBody))
+		return "", logging.NewCodedError("llm_http_error", fmt.Sprintf("llm provider returned status %d", resp.StatusCode), nil)
 	}
 
 	var out chatCompletionResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		c.logger.Warn("JSON parse failure", "operation", operation, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "error", err)
+		c.logger.Warn("JSON parse failure", logging.WithSafeError([]any{"operation", operation, "operation_id", logging.OperationID(ctx), "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_byte_length", len(respBody)}, err)...)
 		return "", err
 	}
 	if len(out.Choices) == 0 {
 		err := errors.New("llm returned no choices")
-		c.logger.Error("LLM request failed", "operation", operation, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "error", err)
+		c.logger.Error("LLM request failed", logging.WithSafeError([]any{"operation", operation, "operation_id", logging.OperationID(ctx), "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_byte_length", len(respBody)}, err)...)
 		return "", err
 	}
 	content := strings.TrimSpace(out.Choices[0].Message.Content)
-	c.logger.Info("LLM request completed", "operation", operation, "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_size", len(respBody), "content_length", len(content))
+	c.logger.Info("LLM request completed", "operation", operation, "operation_id", logging.OperationID(ctx), "model", c.model, "duration_ms", time.Since(started).Milliseconds(), "http_status", resp.StatusCode, "response_byte_length", len(respBody), "response_content_byte_length", len(content))
 	return content, nil
 }
 

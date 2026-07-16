@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+
+	"github.com/spozhydaiev/lead-log/internal/logging"
 	"sort"
 	"time"
 )
@@ -94,42 +96,43 @@ func (d *DailySummary) sendForAll(ctx context.Context, run time.Time) {
 	scopeKey := sourceDate.Format("2006-01-02")
 	d.logger.Info("selected source date", "operation", "scheduler.source_date", "source_date", scopeKey, "timezone", d.location.String(), "mode", string(d.mode))
 	for _, telegramUserID := range d.telegramUserIDs {
-		if ctx.Err() != nil {
+		operationCtx, operationID := logging.EnsureOperationID(ctx)
+		if operationCtx.Err() != nil {
 			return
 		}
-		userID, err := d.service.EnsureUser(ctx, telegramUserID, "")
+		userID, err := d.service.EnsureUser(operationCtx, telegramUserID, "")
 		if err != nil {
-			d.logger.Error("daily summary failure", "operation", "scheduler.ensure_user", "failure_stage", "ensure_user", "telegram_user_id", telegramUserID, "error", err)
+			d.logger.Error("daily summary failure", logging.WithSafeError([]any{"operation", "scheduler.ensure_user", "failure_stage", "ensure_user", "operation_id", operationID}, err)...)
 			continue
 		}
-		sent, err := d.store.HasDailySummarySend(ctx, userID, scopeKey)
+		sent, err := d.store.HasDailySummarySend(operationCtx, userID, scopeKey)
 		if err != nil {
-			d.logger.Error("daily summary failure", "operation", "scheduler.sent_check", "failure_stage", "sent_check", "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
+			d.logger.Error("daily summary failure", logging.WithSafeError([]any{"operation", "scheduler.sent_check", "failure_stage", "sent_check", "operation_id", operationID}, err)...)
 			continue
 		}
 		if sent {
-			d.logger.Info("summary skipped because already sent", "operation", "scheduler.skip", "telegram_user_id", telegramUserID, "user_id", userID, "scope_key", scopeKey)
+			d.logger.Info("summary skipped because already sent", "operation", "scheduler.skip", "operation_id", operationID)
 			continue
 		}
-		response, noteCount, err := d.service.DailyAtDate(ctx, userID, sourceDate, false)
-		d.logger.Info("daily source note count", "operation", "scheduler.note_count", "telegram_user_id", telegramUserID, "user_id", userID, "source_date", scopeKey, "note_count", noteCount)
+		response, noteCount, err := d.service.DailyAtDate(operationCtx, userID, sourceDate, false)
+		d.logger.Info("daily source note count", "operation", "scheduler.note_count", "operation_id", operationID, "note_count", noteCount)
 		if err != nil {
-			d.logger.Error("daily summary failure", "operation", "scheduler.generate", "failure_stage", "generate", "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
+			d.logger.Error("daily summary failure", logging.WithSafeError([]any{"operation", "scheduler.generate", "failure_stage", "generate", "operation_id", operationID}, err)...)
 			continue
 		}
 		if noteCount == 0 {
-			d.logger.Info("summary skipped because no notes", "operation", "scheduler.skip", "telegram_user_id", telegramUserID, "user_id", userID, "scope_key", scopeKey, "note_count", noteCount)
+			d.logger.Info("summary skipped because no notes", "operation", "scheduler.skip", "operation_id", operationID, "note_count", noteCount)
 			continue
 		}
 		if err := d.sender.SendMessage(telegramUserID, response); err != nil {
-			d.logger.Error("daily summary failure", "operation", "scheduler.send", "failure_stage", "send", "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
+			d.logger.Error("daily summary failure", logging.WithSafeError([]any{"operation", "scheduler.send", "failure_stage", "send", "operation_id", operationID}, err)...)
 			continue
 		}
-		if err := d.store.RecordDailySummarySend(ctx, userID, scopeKey); err != nil {
-			d.logger.Error("daily summary failure", "operation", "scheduler.record_send", "failure_stage", "record_send", "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
+		if err := d.store.RecordDailySummarySend(operationCtx, userID, scopeKey); err != nil {
+			d.logger.Error("daily summary failure", logging.WithSafeError([]any{"operation", "scheduler.record_send", "failure_stage", "record_send", "operation_id", operationID}, err)...)
 			continue
 		}
-		d.logger.Info("summary sent", "operation", "scheduler.send", "telegram_user_id", telegramUserID, "user_id", userID, "scope_key", scopeKey)
+		d.logger.Info("summary sent", "operation", "scheduler.send", "operation_id", operationID)
 	}
 }
 

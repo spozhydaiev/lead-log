@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/logging"
 	"github.com/spozhydaiev/lead-log/internal/services"
 )
 
@@ -79,7 +80,7 @@ func (w *NoteEnrichment) poll(ctx context.Context) {
 	}
 	notes, err := w.store.ClaimNextNotesForEnrichment(ctx, w.cfg.BatchSize, w.cfg.MaxAttempts, w.cfg.StaleTimeout)
 	if err != nil {
-		w.logger.Error("note enrichment poll failed", "operation", "worker.note_enrichment.poll_failed", "error", err)
+		w.logger.Error("note enrichment poll failed", logging.WithSafeError([]any{"operation", "worker.note_enrichment.poll_failed"}, err)...)
 		return
 	}
 	if len(notes) == 0 {
@@ -100,10 +101,10 @@ func (w *NoteEnrichment) poll(ctx context.Context) {
 			defer func() { <-sem }()
 			defer func() {
 				if r := recover(); r != nil {
-					w.logger.Error("note enrichment job panic", "operation", "worker.note_enrichment.panic", "note_id", note.ID, "user_id", note.UserID, "panic", r)
+					w.logger.Error("note enrichment job panic", "operation", "worker.note_enrichment.panic", "operation_id", logging.OperationID(ctx), "error_class", "panic")
 				}
 			}()
-			w.process(ctx, note)
+			w.process(logging.ContextWithOperationID(ctx, logging.NewOperationID()), note)
 		}()
 	}
 	wg.Wait()
@@ -111,20 +112,20 @@ func (w *NoteEnrichment) poll(ctx context.Context) {
 
 func (w *NoteEnrichment) process(ctx context.Context, note store.NoteForEnrichment) {
 	started := time.Now()
-	w.logger.Info("note enrichment job claimed", "operation", "worker.note_enrichment.claimed", "note_id", note.ID, "user_id", note.UserID, "attempt", note.ProcessingAttempts, "stale_reclaimed", note.StaleReclaimed)
+	w.logger.Info("note enrichment job claimed", "operation", "worker.note_enrichment.claimed", "operation_id", logging.OperationID(ctx), "attempt", note.ProcessingAttempts, "stale_reclaimed", note.StaleReclaimed)
 	result, err := w.svc.EnrichClaimedNote(ctx, note)
 	if err == nil {
-		w.logger.Info("note enrichment job processed", "operation", "worker.note_enrichment.processed", "note_id", note.ID, "user_id", note.UserID, "attempt", result.Attempt, "model", result.Model, "prompt_version", result.PromptVersion, "duration_ms", time.Since(started).Milliseconds())
+		w.logger.Info("note enrichment job processed", "operation", "worker.note_enrichment.processed", "operation_id", logging.OperationID(ctx), "attempt", result.Attempt, "model", result.Model, "prompt_version", result.PromptVersion, "duration_ms", time.Since(started).Milliseconds())
 		return
 	}
 	if note.ProcessingAttempts >= w.cfg.MaxAttempts {
 		_ = w.store.MarkNoteEnrichmentPermanentlyFailed(context.Background(), note.UserID, note.ID, note.ProcessingStartedAt, err)
-		w.logger.Error("note enrichment permanently failed", "operation", "worker.note_enrichment.permanently_failed", "note_id", note.ID, "user_id", note.UserID, "attempt", note.ProcessingAttempts, "max_attempts", w.cfg.MaxAttempts, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		w.logger.Error("note enrichment permanently failed", logging.WithSafeError([]any{"operation", "worker.note_enrichment.permanently_failed", "operation_id", logging.OperationID(ctx), "attempt", note.ProcessingAttempts, "max_attempts", w.cfg.MaxAttempts, "duration_ms", time.Since(started).Milliseconds()}, err)...)
 		return
 	}
 	next := time.Now().Add(backoff(note.ProcessingAttempts))
 	_ = w.store.ScheduleNoteEnrichmentRetry(context.Background(), note.UserID, note.ID, note.ProcessingStartedAt, next, err)
-	w.logger.Warn("note enrichment retry scheduled", "operation", "worker.note_enrichment.retry_scheduled", "note_id", note.ID, "user_id", note.UserID, "attempt", note.ProcessingAttempts, "next_processing_at", next.Format(time.RFC3339), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	w.logger.Warn("note enrichment retry scheduled", logging.WithSafeError([]any{"operation", "worker.note_enrichment.retry_scheduled", "operation_id", logging.OperationID(ctx), "attempt", note.ProcessingAttempts, "retry_after_seconds", int(backoff(note.ProcessingAttempts).Seconds()), "duration_ms", time.Since(started).Milliseconds()}, err)...)
 }
 
 func backoff(attempt int) time.Duration {
