@@ -17,7 +17,7 @@ import (
 	"github.com/spozhydaiev/lead-log/pkg/utils"
 )
 
-const PromptVersion = "v1"
+const PromptVersion = "v2"
 const NoteEnrichmentPromptVersion = "v2"
 const DefaultNoteEnrichmentStaleTimeout = 3 * time.Minute
 
