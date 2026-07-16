@@ -37,3 +37,17 @@ func TestPromptInstructionLanguages(t *testing.T) {
 		}
 	}
 }
+
+func TestDailyPromptEnumListsMatchValidator(t *testing.T) {
+	prompt := dailyPrompt(models.LanguageEnglish)
+	for _, value := range dailyHighlightTypes {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("daily prompt missing people highlight type %q", value)
+		}
+	}
+	for _, value := range dailyThemes {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("daily prompt missing people highlight theme %q", value)
+		}
+	}
+}

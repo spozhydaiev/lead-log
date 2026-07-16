@@ -1,6 +1,13 @@
 package llm
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/spozhydaiev/lead-log/internal/models"
+)
 
 func TestParseDailyDigestJSON(t *testing.T) {
 	content := `{
@@ -84,10 +91,31 @@ func TestParseDailyDigestJSONRejectsUnusableDigest(t *testing.T) {
 	}
 }
 
-func TestParseDailyDigestJSONRejectsInvalidEnum(t *testing.T) {
-	content := `{"short_summary":"x","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":"Олена","type":"score","theme":"delivery","text":"x","source_note_ids":[1]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
-	if _, err := ParseDailyDigestJSON(content); err == nil {
-		t.Fatal("expected invalid enum error")
+func TestParseDailyDigestJSONNormalizesReportedCollaborationType(t *testing.T) {
+	content := `{"short_summary":"A productive day.","people_highlights":[{"person":"Alex","person_name":"Alex","type":"collaboration","theme":"teamwork","text":"Worked together on retry policy."}]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest.PeopleHighlights[0].Type != "collaboration" {
+		t.Fatalf("type = %q, want collaboration", digest.PeopleHighlights[0].Type)
+	}
+	if digest.PeopleHighlights[0].Theme != "other" {
+		t.Fatalf("theme = %q, want other", digest.PeopleHighlights[0].Theme)
+	}
+}
+
+func TestParseDailyDigestJSONNormalizesUnknownType(t *testing.T) {
+	content := `{"short_summary":"Summary","people_highlights":[{"person_name":"Alex","type":"unexpected_future_type","theme":"other","text":"Some useful context."}]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest.ShortSummary != "Summary" {
+		t.Fatalf("short summary = %q, want Summary", digest.ShortSummary)
+	}
+	if digest.PeopleHighlights[0].Type != fallbackDailyHighlightType {
+		t.Fatalf("type = %q, want %q", digest.PeopleHighlights[0].Type, fallbackDailyHighlightType)
 	}
 }
 
@@ -126,13 +154,40 @@ func TestParseDailyDigestJSONNormalizesTypeValueInTheme(t *testing.T) {
 	}
 }
 
-func TestParseDailyDigestJSONRejectsInvalidTypeWithValidTheme(t *testing.T) {
-	content := dailyDigestJSON("score", "delivery")
-	if _, err := ParseDailyDigestJSON(content); err == nil {
-		t.Fatal("expected invalid type error")
+func TestParseDailyDigestJSONMixedValidAndInvalidOptionalItems(t *testing.T) {
+	content := `{"short_summary":" ","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":"Олена","type":"commitment","theme":"delivery","text":"Пообіцяла оновити ETA.","source_note_ids":[1]},{"person_name":"Alex","type":"unexpected_future_type","theme":"other","text":"Some useful context.","source_note_ids":[2]},{"person_name":" ","type":"commitment","theme":"delivery","text":"missing person","source_note_ids":[3]}],"decisions":[{"text":"Decision remains valid.","source_note_ids":[4]}],"suggested_next_steps":[],"unclear_items":[]}`
+	digest, err := ParseDailyDigestJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 2 {
+		t.Fatalf("people highlights len = %d, want 2", len(digest.PeopleHighlights))
+	}
+	if digest.PeopleHighlights[0].Type != "commitment" || digest.PeopleHighlights[1].Type != fallbackDailyHighlightType {
+		t.Fatalf("unexpected highlight types: %+v", digest.PeopleHighlights)
+	}
+	if len(digest.Decisions) != 1 {
+		t.Fatalf("decisions len = %d, want 1", len(digest.Decisions))
 	}
 }
 
 func dailyDigestJSON(typeValue, theme string) string {
 	return `{"short_summary":"x","open_loops":[],"ticket_candidates":[],"people_highlights":[{"person_name":"Олена","type":"` + typeValue + `","theme":"` + theme + `","text":"x","source_note_ids":[1]}],"decisions":[],"suggested_next_steps":[],"unclear_items":[]}`
+}
+
+func TestProcessDailyUsesTolerantParserForCollaboration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"short_summary\":\"A productive day.\",\"people_highlights\":[{\"person_name\":\"Alex\",\"type\":\"collaboration\",\"theme\":\"teamwork\",\"text\":\"Worked together on retry policy.\"}]}"}}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key", "test-model", models.LanguageEnglish)
+	digest, err := client.ProcessDaily(context.Background(), "#1 note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digest.PeopleHighlights) != 1 || digest.PeopleHighlights[0].Type != "collaboration" {
+		t.Fatalf("unexpected daily digest: %+v", digest)
+	}
 }

@@ -9,15 +9,49 @@ import (
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
-var allowedDailyHighlightTypes = map[string]bool{
-	"positive_signal": true, "concern": true, "follow_up_needed": true, "growth_topic": true,
-	"context": true, "commitment": true, "risk": true,
+var dailyHighlightTypes = []string{
+	"positive_signal", "concern", "follow_up_needed", "growth_topic",
+	"context", "commitment", "risk", "collaboration",
 }
 
-var allowedDailyThemes = map[string]bool{
-	"communication": true, "ownership": true, "delivery": true, "collaboration": true,
-	"technical_quality": true, "reliability": true, "hiring": true, "release": true,
-	"process": true, "other": true,
+var allowedDailyHighlightTypes = stringSet(dailyHighlightTypes)
+
+var dailyHighlightTypeAliases = map[string]string{
+	"teamwork": "collaboration",
+}
+
+const fallbackDailyHighlightType = "context"
+
+var dailyThemes = []string{
+	"communication", "ownership", "delivery", "collaboration",
+	"technical_quality", "reliability", "hiring", "release",
+	"process", "other",
+}
+
+var allowedDailyThemes = stringSet(dailyThemes)
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func DailyHighlightTypesForPrompt() string {
+	return strings.Join(dailyHighlightTypes, ", ")
+}
+
+func DailyThemesForPrompt() string {
+	return strings.Join(dailyThemes, ", ")
+}
+
+func DailyHighlightTypesSchemaForPrompt() string {
+	return strings.Join(dailyHighlightTypes, "|")
+}
+
+func DailyThemesSchemaForPrompt() string {
+	return strings.Join(dailyThemes, "|")
 }
 
 func ParseDailyDigestJSON(content string) (models.DailyDigest, error) {
@@ -42,13 +76,10 @@ func ParseDailyDigestJSONWithLogger(content string, logger *slog.Logger) (models
 	digest.SuggestedNextSteps = validDailyTextItems("suggested_next_steps", digest.SuggestedNextSteps, logger)
 	digest.UnclearItems = validDailyTextItems("unclear_items", digest.UnclearItems, logger)
 
-	peopleHighlights, err := validDailyPeopleHighlights(digest.PeopleHighlights, logger)
-	if err != nil {
-		return models.DailyDigest{}, err
-	}
-	digest.PeopleHighlights = peopleHighlights
+	digest.PeopleHighlights = validDailyPeopleHighlights(digest.PeopleHighlights, logger)
 
 	if unusableDailyDigest(digest) {
+		logger.Warn("daily digest rejected as unusable", "operation", "daily.parse_json")
 		return models.DailyDigest{}, fmt.Errorf("parse daily digest json: digest has no summary or valid sections")
 	}
 
@@ -95,26 +126,37 @@ func validDailyTicketCandidates(items []models.DailyTicketCandidate, logger *slo
 	return valid
 }
 
-func validDailyPeopleHighlights(items []models.DailyPeopleHighlight, logger *slog.Logger) ([]models.DailyPeopleHighlight, error) {
+func validDailyPeopleHighlights(items []models.DailyPeopleHighlight, logger *slog.Logger) []models.DailyPeopleHighlight {
 	valid := make([]models.DailyPeopleHighlight, 0, len(items))
+	normalizedTypes := 0
+	unknownTypes := 0
+	normalizedThemes := 0
+	skipped := 0
 	for i := range items {
 		h := items[i]
 		h.PersonName = strings.TrimSpace(h.PersonName)
 		h.Text = strings.TrimSpace(h.Text)
 		if h.PersonName == "" || h.Text == "" {
+			skipped++
 			logger.Warn("invalid optional item skipped", "operation", "daily.parse_json", "section", "people_highlights", "item_index", i, "reason", "person_name and text are required")
 			continue
 		}
-		normalizeDailyPeopleHighlight(i, &h, logger)
-		if !allowedDailyHighlightTypes[h.Type] {
-			return nil, fmt.Errorf("parse daily digest json: people_highlights[%d] has invalid type %q", i, h.Type)
+		stats := normalizeDailyPeopleHighlight(i, &h, logger)
+		if stats.typeNormalized {
+			normalizedTypes++
 		}
-		if !allowedDailyThemes[h.Theme] {
-			return nil, fmt.Errorf("parse daily digest json: people_highlights[%d] has invalid theme %q", i, h.Theme)
+		if stats.unknownType {
+			unknownTypes++
+		}
+		if stats.themeNormalized {
+			normalizedThemes++
 		}
 		valid = append(valid, h)
 	}
-	return valid, nil
+	if normalizedTypes > 0 || normalizedThemes > 0 || skipped > 0 {
+		logger.Warn("daily digest accepted with normalization", "operation", "daily.parse_json", "unknown_people_highlight_types", unknownTypes, "normalized_people_highlight_types", normalizedTypes, "normalized_people_highlight_themes", normalizedThemes, "skipped_people_highlights", skipped, "unknown_optional_enums", unknownTypes+normalizedThemes)
+	}
+	return valid
 }
 
 func validDailyTextItems(section string, items []models.DailyTextItem, logger *slog.Logger) []models.DailyTextItem {
@@ -140,22 +182,39 @@ func unusableDailyDigest(d models.DailyDigest) bool {
 		len(d.UnclearItems) == 0
 }
 
-func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight, logger *slog.Logger) {
+type dailyPeopleHighlightNormalization struct {
+	typeNormalized  bool
+	unknownType     bool
+	themeNormalized bool
+}
+
+func normalizeDailyPeopleHighlight(index int, h *models.DailyPeopleHighlight, logger *slog.Logger) dailyPeopleHighlightNormalization {
 	originalType := h.Type
 	originalTheme := h.Theme
 	h.Type = strings.TrimSpace(h.Type)
 	h.Theme = strings.TrimSpace(h.Theme)
 
 	themeLooksLikeType := allowedDailyHighlightTypes[h.Theme]
+	stats := dailyPeopleHighlightNormalization{}
+	if alias, ok := dailyHighlightTypeAliases[h.Type]; ok {
+		h.Type = alias
+	}
 	if !allowedDailyHighlightTypes[h.Type] && themeLooksLikeType {
 		h.Type = h.Theme
+	}
+	if !allowedDailyHighlightTypes[h.Type] {
+		h.Type = fallbackDailyHighlightType
+		stats.unknownType = true
 	}
 
 	if !allowedDailyThemes[h.Theme] {
 		h.Theme = "other"
 	}
 
+	stats.typeNormalized = h.Type != strings.TrimSpace(originalType)
+	stats.themeNormalized = h.Theme != strings.TrimSpace(originalTheme)
 	if h.Type != originalType || h.Theme != originalTheme {
 		logger.Warn("invalid optional item normalized", "operation", "daily.parse_json", "section", "people_highlights", "item_index", index, "reason", "invalid type/theme normalized")
 	}
+	return stats
 }

@@ -252,8 +252,8 @@ Language rules:
 
 People highlight classification rules:
 - type and theme are separate fields with separate allowed values.
-- type is the highlight kind and must be one of: positive_signal, concern, follow_up_needed, growth_topic, context, commitment, risk.
-- theme is the work/topic area and must be one of: communication, ownership, delivery, collaboration, technical_quality, reliability, hiring, release, process, other.
+- type is the highlight kind and must be one of: ` + DailyHighlightTypesForPrompt() + `.
+- theme is the work/topic area and must be one of: ` + DailyThemesForPrompt() + `.
 - Never put a type value such as growth_topic or positive_signal in the theme field.
 - If no listed theme is clearly supported by the notes, use theme "other". Do not invent a theme.
 - Every people_highlights item must include non-empty person_name, type, theme, text, and source_note_ids.
@@ -271,8 +271,8 @@ Return valid JSON only with this exact shape. Use empty arrays for empty section
   "people_highlights": [
     {
       "person_name": "name",
-      "type": "positive_signal|concern|follow_up_needed|growth_topic|context|commitment|risk",
-      "theme": "communication|ownership|delivery|collaboration|technical_quality|reliability|hiring|release|process|other",
+      "type": "` + DailyHighlightTypesSchemaForPrompt() + `",
+      "theme": "` + DailyThemesSchemaForPrompt() + `",
       "text": "neutral source-backed note",
       "source_note_ids": [1]
     }
