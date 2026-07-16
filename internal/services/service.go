@@ -89,11 +89,11 @@ func (s *Service) MarkTelegramUpdateFailed(ctx context.Context, meta store.Teleg
 }
 
 func (s *Service) CaptureNoteForTelegramUpdate(ctx context.Context, userID int64, raw string, meta store.TelegramUpdateMeta, startedAt time.Time) (string, error) {
-	noteID, err := s.store.SaveRawNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
+	_, err := s.store.SaveRawNoteAndMarkTelegramUpdateProcessed(ctx, userID, raw, meta, startedAt)
 	if err != nil {
 		return "", fmt.Errorf("capture.save_raw_note: %w", err)
 	}
-	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "user_id", userID, "note_id", noteID, "note_length", len(raw))
+	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "operation_id", logging.OperationID(ctx), "note_length", len(raw))
 	return s.language.CommonMessages().SavedRaw, nil
 }
 
@@ -102,7 +102,7 @@ func (s *Service) AddNoteForTelegramUpdate(ctx context.Context, userID int64, ra
 	if err != nil {
 		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "user_id", userID, "note_id", claim.ID, "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
+	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "operation_id", logging.OperationID(ctx), "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
 	result, err := s.EnrichClaimedNote(ctx, claim)
 	if err != nil {
 		return "", err
@@ -122,11 +122,11 @@ func (s *Service) DoneForTelegramUpdate(ctx context.Context, userID int64, arg s
 }
 
 func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
-	noteID, err := s.store.SaveRawNote(ctx, userID, raw)
+	_, err := s.store.SaveRawNote(ctx, userID, raw)
 	if err != nil {
 		return "", fmt.Errorf("capture.save_raw_note: %w", err)
 	}
-	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "user_id", userID, "note_id", noteID, "note_length", len(raw))
+	s.logger.Info("raw note saved", "operation", "capture.save_raw_note", "operation_id", logging.OperationID(ctx), "note_length", len(raw))
 	return s.language.CommonMessages().SavedRaw, nil
 }
 
@@ -135,7 +135,7 @@ func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string
 	if err != nil {
 		return "", fmt.Errorf("now.create_raw_note: %w", err)
 	}
-	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "user_id", userID, "note_id", claim.ID, "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
+	s.logger.Info("note created and claimed", "operation", "note.created_claimed", "operation_id", logging.OperationID(ctx), "status", store.NoteProcessingStatusProcessing, "note_length", len(raw))
 	result, err := s.EnrichClaimedNote(ctx, claim)
 	if err != nil {
 		return "", err
@@ -160,10 +160,10 @@ func (s *Service) RetryNoteEnrichment(ctx context.Context, userID, noteID int64)
 }
 
 func (s *Service) ReprocessNote(ctx context.Context, userID, noteID int64) (NoteEnrichmentResult, error) {
-	s.logger.Info("reprocess started", "operation", "note.reprocess_started", "user_id", userID, "note_id", noteID, "prompt_version", NoteEnrichmentPromptVersion)
+	s.logger.Info("reprocess started", "operation", "note.reprocess_started", "operation_id", logging.OperationID(ctx), "prompt_version", NoteEnrichmentPromptVersion)
 	result, err := s.enrichNote(ctx, userID, noteID, true)
 	if err == nil {
-		s.logger.Info("reprocess completed", "operation", "note.reprocess_completed", "user_id", userID, "note_id", noteID, "attempt", result.Attempt, "model", result.Model, "prompt_version", result.PromptVersion)
+		s.logger.Info("reprocess completed", "operation", "note.reprocess_completed", "operation_id", logging.OperationID(ctx), "attempt", result.Attempt, "model", result.Model, "prompt_version", result.PromptVersion)
 	}
 	return result, err
 }
@@ -171,21 +171,21 @@ func (s *Service) ReprocessNote(ctx context.Context, userID, noteID int64) (Note
 func (s *Service) EnrichClaimedNote(ctx context.Context, claim store.NoteForEnrichment) (NoteEnrichmentResult, error) {
 	userID, noteID := claim.UserID, claim.ID
 	if claim.ProcessingStatus != store.NoteProcessingStatusProcessing {
-		s.logger.Info("enrichment not claimed", "operation", "note.enrichment_already_processing", "user_id", userID, "note_id", noteID, "status", claim.ProcessingStatus, "attempt", claim.ProcessingAttempts)
+		s.logger.Info("enrichment not claimed", "operation", "note.enrichment_already_processing", "operation_id", logging.OperationID(ctx), "status", claim.ProcessingStatus, "attempt", claim.ProcessingAttempts)
 		return NoteEnrichmentResult{}, fmt.Errorf("note enrichment not claimable: %s", claim.ProcessingStatus)
 	}
 	if claim.StaleReclaimed {
-		s.logger.Info("stale processing note reclaimed", "operation", "note.enrichment_stale_reclaim", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts)
+		s.logger.Info("stale processing note reclaimed", "operation", "note.enrichment_stale_reclaim", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts)
 	}
-	s.logger.Info("enrichment claim success", "operation", "note.enrichment_claim", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "prompt_version", NoteEnrichmentPromptVersion)
+	s.logger.Info("enrichment claim success", "operation", "note.enrichment_claim", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "prompt_version", NoteEnrichmentPromptVersion)
 
 	model := s.llm.Model()
 	started := time.Now()
-	s.logger.Info("LLM processing started", "operation", "note.enrichment_llm_started", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
+	s.logger.Info("LLM processing started", "operation", "note.enrichment_llm_started", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion)
 	parsed, err := s.llm.ParseManagerNote(ctx, claim.RawText)
 	if err != nil {
 		_ = s.store.MarkNoteEnrichmentFailed(ctx, userID, noteID, claim.ProcessingStartedAt, err)
-		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		s.logger.Error("enrichment failed", logging.WithSafeError([]any{"operation", "note.enrichment_failed", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds()}, err)...)
 		return NoteEnrichmentResult{}, fmt.Errorf("now.llm_request: %w", err)
 	}
 	parsed = models.AddTicketFallbackMentions(parsed, claim.RawText)
@@ -198,13 +198,13 @@ func (s *Service) EnrichClaimedNote(ctx context.Context, claim store.NoteForEnri
 		entityTypes[rec.Type]++
 		parsed.EntityMentions = append(parsed.EntityMentions, models.EntityMention{Type: rec.Type, Value: rec.NormalizedValue, RawValue: rec.RawValue, DisplayValue: rec.DisplayValue, Context: rec.Context})
 	}
-	s.logger.Info("LLM processing completed", "operation", "note.enrichment_llm_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed), "parsed_decisions", len(parsed.Decisions), "parsed_entities", len(parsed.EntityMentions), "normalized_entities", len(normalizedEntities), "skipped_decisions", skippedDecisions, "skipped_entities", skippedEntities, "entity_types", entityTypes)
+	s.logger.Info("LLM processing completed", "operation", "note.enrichment_llm_completed", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "duration_ms", time.Since(started).Milliseconds(), "actions", len(parsed.Actions), "people_notes", len(parsed.PeopleNotes), "people_mentioned", countParsedPeople(parsed), "parsed_decisions", len(parsed.Decisions), "parsed_entities", len(parsed.EntityMentions), "normalized_entities", len(normalizedEntities), "skipped_decisions", skippedDecisions, "skipped_entities", skippedEntities, "entity_types", entityTypes)
 	if err := s.store.SaveNoteEnrichmentResult(ctx, userID, noteID, claim.ProcessingStartedAt, parsed, model, NoteEnrichmentPromptVersion); err != nil {
 		_ = s.store.MarkNoteEnrichmentFailed(ctx, userID, noteID, claim.ProcessingStartedAt, err)
-		s.logger.Error("enrichment failed", "operation", "note.enrichment_failed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "error", err)
+		s.logger.Error("enrichment failed", logging.WithSafeError([]any{"operation", "note.enrichment_failed", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion}, err)...)
 		return NoteEnrichmentResult{}, fmt.Errorf("now.persistence: %w", err)
 	}
-	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "user_id", userID, "note_id", noteID, "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "persisted_decisions", len(parsed.Decisions), "persisted_entities", len(parsed.EntityMentions))
+	s.logger.Info("persistence completed", "operation", "note.enrichment_persistence_completed", "operation_id", logging.OperationID(ctx), "attempt", claim.ProcessingAttempts, "model", model, "prompt_version", NoteEnrichmentPromptVersion, "persisted_decisions", len(parsed.Decisions), "persisted_entities", len(parsed.EntityMentions))
 	return NoteEnrichmentResult{NoteID: noteID, Parsed: parsed, Attempt: claim.ProcessingAttempts, Model: model, PromptVersion: NoteEnrichmentPromptVersion}, nil
 }
 
@@ -288,12 +288,12 @@ func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time
 	localNow := sourceDate.In(loc)
 	startOfDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
 	endOfDay := startOfDay.AddDate(0, 0, 1)
-	log := s.logger.With("operation", "daily", "user_id", userID, "period_start", startOfDay.Format(time.RFC3339), "period_end", endOfDay.Format(time.RFC3339), "timezone", loc.String())
+	log := s.logger.With("operation", "daily", "operation_id", logging.OperationID(ctx), "period_start", startOfDay.Format(time.RFC3339), "period_end", endOfDay.Format(time.RFC3339), "timezone", loc.String())
 	log.Info("daily command started", "resolved_timezone", loc.String())
 
 	source, err := s.store.RecentDailySource(ctx, userID, startOfDay, endOfDay)
 	if err != nil {
-		log.Error("daily failed", "failure_stage", "source loading", "operation", "daily.load_source", "error", err)
+		log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "source loading", "operation", "daily.load_source"}, err)...)
 		return "", 0, fmt.Errorf("daily.load_source: %w", err)
 	}
 	if strings.TrimSpace(source) == "" {
@@ -304,13 +304,13 @@ func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time
 	scopeKey := scopedCacheKey(startOfDay.Format("2006-01-02"), s.language)
 	sourceHash := utils.HashStrings(source)
 	noteCount := countSourceNotes(source)
-	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", noteCount)
+	log = log.With("note_count", noteCount)
 	log.Info("daily source loaded")
 
 	if !refresh {
 		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "daily", scopeKey, sourceHash, PromptVersion)
 		if err != nil {
-			log.Error("daily failed", "failure_stage", "cache lookup", "operation", "daily.cache_lookup", "error", err)
+			log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "cache lookup", "operation", "daily.cache_lookup"}, err)...)
 			return "", noteCount, fmt.Errorf("daily.cache_lookup: %w", err)
 		}
 		if cached != nil {
@@ -323,24 +323,24 @@ func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time
 	log.Info("LLM call started", "operation", "daily.llm_request")
 	digest, err := s.llm.ProcessDaily(ctx, source)
 	if err != nil {
-		log.Error("daily failed", "failure_stage", "LLM request", "operation", "daily.llm_request", "error", err)
+		log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "LLM request", "operation", "daily.llm_request"}, err)...)
 		return "", noteCount, fmt.Errorf("daily.llm_request: %w", err)
 	}
 	log.Info("LLM call completed", "operation", "daily.llm_request")
 	responseText := FormatDailyDigestForLanguage(digest, s.language)
 	if strings.TrimSpace(responseText) == "" {
 		err := fmt.Errorf("empty formatted daily digest")
-		log.Error("daily failed", "failure_stage", "formatting", "operation", "daily.formatting", "error", err)
+		log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "formatting", "operation", "daily.formatting"}, err)...)
 		return "", noteCount, err
 	}
 	responseJSON, err := json.Marshal(digest)
 	if err != nil {
-		log.Error("daily failed", "failure_stage", "JSON parsing", "operation", "daily.parse_json", "error", err)
+		log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "JSON parsing", "operation", "daily.parse_json"}, err)...)
 		return "", noteCount, fmt.Errorf("daily.parse_json: %w", err)
 	}
 
 	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "daily", ScopeKey: scopeKey, PeriodStart: &startOfDay, PeriodEnd: &endOfDay, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: responseText, ResponseJSON: string(responseJSON)}); err != nil {
-		log.Error("daily failed", "failure_stage", "cache save", "operation", "daily.cache_save", "error", err)
+		log.Error("daily failed", logging.WithSafeError([]any{"failure_stage", "cache save", "operation", "daily.cache_save"}, err)...)
 		return "", noteCount, fmt.Errorf("daily.cache_save: %w", err)
 	}
 	log.Info("digest cached", "operation", "daily.cache_save")
@@ -351,12 +351,12 @@ func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
 	now := time.Now()
 	start := now.AddDate(0, 0, -7)
-	log := s.logger.With("operation", "weekly", "user_id", userID, "period_start", start.Format(time.RFC3339), "period_end", now.Format(time.RFC3339))
+	log := s.logger.With("operation", "weekly", "operation_id", logging.OperationID(ctx), "period_start", start.Format(time.RFC3339), "period_end", now.Format(time.RFC3339))
 	log.Info("weekly command started")
 
 	source, err := s.store.RecentWeeklySource(ctx, userID, start)
 	if err != nil {
-		log.Error("weekly failed", "failure_stage", "source loading", "operation", "weekly.load_source", "error", err)
+		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "source loading", "operation", "weekly.load_source"}, err)...)
 		return "", fmt.Errorf("weekly.load_source: %w", err)
 	}
 	if strings.TrimSpace(source) == "" {
@@ -368,13 +368,13 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 	scopeKey := scopedCacheKey(fmt.Sprintf("%d-W%02d", year, week), s.language)
 	sourceHash := utils.HashStrings(source)
 	noteCount := countSourceNotes(source)
-	log = log.With("scope_key", scopeKey, "source_hash_prefix", logging.HashPrefix(sourceHash), "note_count", noteCount)
+	log = log.With("note_count", noteCount)
 	log.Info("weekly source loaded")
 
 	if !refresh {
 		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "weekly", scopeKey, sourceHash, PromptVersion)
 		if err != nil {
-			log.Error("weekly failed", "failure_stage", "cache lookup", "operation", "weekly.cache_lookup", "error", err)
+			log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "cache lookup", "operation", "weekly.cache_lookup"}, err)...)
 			return "", fmt.Errorf("weekly.cache_lookup: %w", err)
 		}
 		if cached != nil {
@@ -386,13 +386,13 @@ func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (strin
 	log.Info("LLM call started", "operation", "weekly.llm_request")
 	response, err := s.llm.SummarizeWeekly(ctx, source)
 	if err != nil {
-		log.Error("weekly failed", "failure_stage", "LLM request", "operation", "weekly.llm_request", "error", err)
+		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "LLM request", "operation", "weekly.llm_request"}, err)...)
 		return "", fmt.Errorf("weekly.llm_request: %w", err)
 	}
 	log.Info("LLM call completed", "operation", "weekly.llm_request")
 
 	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &now, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: response}); err != nil {
-		log.Error("weekly failed", "failure_stage", "cache save", "operation", "weekly.cache_save", "error", err)
+		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "cache save", "operation", "weekly.cache_save"}, err)...)
 		return "", fmt.Errorf("weekly.cache_save: %w", err)
 	}
 	log.Info("cache save completed", "operation", "weekly.cache_save")

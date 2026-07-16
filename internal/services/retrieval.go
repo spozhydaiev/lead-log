@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/logging"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -30,7 +32,7 @@ func (s *Service) Retrieve(ctx context.Context, q models.RetrievalQuery) ([]mode
 	}
 	kinds, err := retrievalKinds(q.Kinds)
 	if err != nil {
-		s.logger.Warn("retrieval validation failed", "operation", "retrieval.validate", "error", err)
+		s.logger.Warn("retrieval validation failed", logging.WithSafeError([]any{"operation", "retrieval.validate", "operation_id", logging.OperationID(ctx)}, err)...)
 		return nil, err
 	}
 	if q.UserID <= 0 {
@@ -40,7 +42,7 @@ func (s *Service) Retrieve(ctx context.Context, q models.RetrievalQuery) ([]mode
 		return nil, fmt.Errorf("%w: from must be before to", ErrInvalidRetrievalQuery)
 	}
 	if isEmptyRetrieval(q) {
-		s.logger.Warn("retrieval validation failed", "operation", "retrieval.validate", "user_id", q.UserID)
+		s.logger.Warn("retrieval validation failed", "operation", "retrieval.validate", "operation_id", logging.OperationID(ctx))
 		return nil, fmt.Errorf("%w: at least one filter is required", ErrInvalidRetrievalQuery)
 	}
 
@@ -68,14 +70,14 @@ func (s *Service) Retrieve(ctx context.Context, q models.RetrievalQuery) ([]mode
 		return nil, err
 	}
 
-	log := s.logger.With("operation", "retrieval", "user_id", q.UserID, "limit", limit, "kinds", kindStrings(kinds), "has_text", f.Text != "", "has_person", f.PersonID != nil, "has_entity", f.EntityType != "", "from", timePtrString(q.From), "to", timePtrString(q.To))
+	log := s.logger.With("operation", "retrieval", "operation_id", logging.OperationID(ctx), "limit", limit, "kinds", kindStrings(kinds), "has_text", f.Text != "", "has_person", f.PersonID != nil, "has_entity", f.EntityType != "", "from", timePtrString(q.From), "to", timePtrString(q.To))
 	log.Info("retrieval started")
 	var all []models.RetrievalItem
 	counts := map[string]int{}
 	call := func(kind models.RetrievalKind, fn func(context.Context, int64, store.RetrievalFilters) ([]models.RetrievalItem, error)) error {
 		items, err := fn(ctx, q.UserID, f)
 		if err != nil {
-			log.Error("retrieval store failure", "kind", kind, "error", err)
+			log.Error("retrieval store failure", logging.WithSafeError([]any{"kind", kind}, err)...)
 			return err
 		}
 		counts[string(kind)] = len(items)

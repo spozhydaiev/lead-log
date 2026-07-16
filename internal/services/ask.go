@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spozhydaiev/lead-log/internal/logging"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -34,19 +36,19 @@ func (s *Service) Ask(ctx context.Context, userID int64, question string) (strin
 	if utf8.RuneCountInString(q) > MaxAskQuestionRunes {
 		return s.language.CommonMessages().AskTooLong, nil
 	}
-	log := s.logger.With("operation", "ask", "user_id", userID, "question_length", len(q), "question_hash", hashPrefix(q), "planning_prompt_version", AskPlanningPromptVersion, "answer_prompt_version", AskAnswerPromptVersion, "model", s.llm.Model())
+	log := s.logger.With("operation", "ask", "operation_id", logging.OperationID(ctx), "query_length", len(q), "planning_prompt_version", AskPlanningPromptVersion, "answer_prompt_version", AskAnswerPromptVersion, "model", s.llm.Model())
 	log.Info("ask started")
 	det := deterministicAskIntent(q)
 	planStart := time.Now()
 	intent, err := s.llm.PlanAskQuery(ctx, q, time.Now().In(s.dailyLocation).Format("2006-01-02"), s.dailyLocation.String(), string(s.language))
 	if err != nil {
-		log.Error("ask failed", "failure_stage", "planning", "duration_ms", time.Since(planStart).Milliseconds(), "error", err)
+		log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "planning", "duration_ms", time.Since(planStart).Milliseconds()}, err)...)
 		return "", fmt.Errorf("%w: %v", ErrAskPlanning, err)
 	}
 	intent = mergeDeterministicIntent(intent, det)
 	intent, err = normalizeAskIntent(intent, q, time.Now(), s.dailyLocation)
 	if err != nil {
-		log.Error("ask failed", "failure_stage", "intent_validation", "error", err)
+		log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "intent_validation"}, err)...)
 		return "", fmt.Errorf("%w: %v", ErrAskPlanning, err)
 	}
 	log.Info("ask intent planned", "planner_duration_ms", time.Since(planStart).Milliseconds(), "intent_type", intent.IntentType, "date_range_type", intent.DateRange.Type, "requested_kinds", kindStrings(intent.Kinds))
@@ -56,7 +58,7 @@ func (s *Service) Ask(ctx context.Context, userID int64, question string) (strin
 	for _, rq := range queries {
 		items, err := s.Retrieve(ctx, rq)
 		if err != nil {
-			log.Error("ask failed", "failure_stage", "retrieval", "error", err)
+			log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "retrieval"}, err)...)
 			return "", err
 		}
 		all = append(all, items...)
@@ -70,7 +72,7 @@ func (s *Service) Ask(ctx context.Context, userID int64, question string) (strin
 	answerStart := time.Now()
 	ans, err := s.llm.GenerateAskAnswer(ctx, q, intent, candidates, string(s.language))
 	if err != nil {
-		log.Error("ask failed", "failure_stage", "answer_generation", "duration_ms", time.Since(answerStart).Milliseconds(), "error", err)
+		log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "answer_generation", "duration_ms", time.Since(answerStart).Milliseconds()}, err)...)
 		return "", fmt.Errorf("%w: %v", ErrAskAnswer, err)
 	}
 	ans = validateAskAnswer(ans, candidates)

@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spozhydaiev/lead-log/internal/logging"
+
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -26,7 +28,7 @@ var ErrInvalidTicketKey = errors.New("invalid ticket key")
 
 func (s *Service) GetTicketContext(ctx context.Context, userID int64, ticketKey string) (models.TicketContext, error) {
 	started := time.Now()
-	log := s.logger.With("operation", "ticket.context", "user_id", userID, "ticket_key_length", len(strings.TrimSpace(ticketKey)), "ticket_key_hash", shortHash(strings.TrimSpace(ticketKey)))
+	log := s.logger.With("operation", "ticket.context", "operation_id", logging.OperationID(ctx), "key_length", len(strings.TrimSpace(ticketKey)))
 	log.Info("ticket command started")
 	normalized, ok := models.NormalizeTicketKey(ticketKey)
 	log.Info("ticket key validation completed", "valid", ok)
@@ -36,13 +38,13 @@ func (s *Service) GetTicketContext(ctx context.Context, userID int64, ticketKey 
 	out := models.TicketContext{TicketKey: normalized, KnownStatus: "not recorded"}
 	items, err := s.Retrieve(ctx, models.RetrievalQuery{UserID: userID, Kinds: []models.RetrievalKind{models.RetrievalKindEntityMention}, EntityType: models.EntityTypeTicket, EntityValue: normalized, Limit: TicketMentionLimit})
 	if err != nil {
-		log.Error("ticket command failed", "failure_stage", "exact_lookup", "error", err)
+		log.Error("ticket command failed", logging.WithSafeError([]any{"failure_stage", "exact_lookup"}, err)...)
 		return out, err
 	}
 	log.Info("ticket exact mentions loaded", "exact_mention_count", len(items))
 	bounds, err := s.store.GetTicketMentionBounds(ctx, userID, normalized)
 	if err != nil {
-		log.Error("ticket command failed", "failure_stage", "mention_bounds", "error", err)
+		log.Error("ticket command failed", logging.WithSafeError([]any{"failure_stage", "mention_bounds"}, err)...)
 		return out, err
 	}
 	out.FirstMentionAt, out.LastMentionAt = bounds.First, bounds.Last
@@ -58,7 +60,7 @@ func (s *Service) GetTicketContext(ctx context.Context, userID int64, ticketKey 
 	}
 	fallback, err := s.store.SearchTicketFallbackNotes(ctx, userID, normalized, TicketFallbackLimit)
 	if err != nil {
-		log.Error("ticket command failed", "failure_stage", "raw_fallback", "error", err)
+		log.Error("ticket command failed", logging.WithSafeError([]any{"failure_stage", "raw_fallback"}, err)...)
 		return out, err
 	}
 	fallbackAdded := 0
@@ -86,7 +88,7 @@ func (s *Service) GetTicketContext(ctx context.Context, userID int64, ticketKey 
 	}
 	actions, err := s.store.ListActionsBySourceNoteIDs(ctx, userID, noteIDs, TicketActionLimit)
 	if err != nil {
-		log.Error("ticket command failed", "failure_stage", "actions", "error", err)
+		log.Error("ticket command failed", logging.WithSafeError([]any{"failure_stage", "actions"}, err)...)
 		return out, err
 	}
 	for _, a := range actions {
@@ -94,7 +96,7 @@ func (s *Service) GetTicketContext(ctx context.Context, userID int64, ticketKey 
 	}
 	decisions, err := s.store.ListDecisionsBySourceNoteIDs(ctx, userID, noteIDs, TicketDecisionLimit)
 	if err != nil {
-		log.Error("ticket command failed", "failure_stage", "decisions", "error", err)
+		log.Error("ticket command failed", logging.WithSafeError([]any{"failure_stage", "decisions"}, err)...)
 		return out, err
 	}
 	for _, d := range decisions {

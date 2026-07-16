@@ -10,6 +10,7 @@ import (
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
 	"github.com/spozhydaiev/lead-log/internal/config"
+	"github.com/spozhydaiev/lead-log/internal/logging"
 	svc "github.com/spozhydaiev/lead-log/internal/services"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
 )
@@ -52,7 +53,7 @@ func New(cfg config.Config, svc *svc.Service, logger ...*slog.Logger) (*Bot, err
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	b.logger.Info("bot polling started", "operation", "bot.polling", "bot_username", b.api.Self.UserName)
+	b.logger.Info("bot polling started", "operation", "bot.polling")
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := b.api.GetUpdatesChan(u)
@@ -91,22 +92,24 @@ func (b *Bot) handleMessageWithReply(ctx context.Context, msg *tgbotapi.Message,
 }
 
 func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int64, msg *tgbotapi.Message, reply func(chatID int64, text string)) {
+	ctx, operationID := logging.EnsureOperationID(ctx)
 	telegramUserID := msg.From.ID
 	if !config.IsTelegramUserAllowed(b.cfg.AllowedTelegramUserIDs, telegramUserID) {
+		b.logger.Warn("authorization denied", "operation", "authorization", "operation_id", operationID, "result", "denied")
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().AccessDenied)
 		return
 	}
 
 	userID, err := b.svc.EnsureUser(ctx, telegramUserID, msg.From.UserName)
 	if err != nil {
-		b.logger.Error("command failed", "operation", "bot.ensure_user", "telegram_user_id", telegramUserID, "error", err)
+		b.logger.Error("command failed", logging.WithSafeError([]any{"operation", "bot.ensure_user", "operation_id", operationID}, err)...)
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UserInitFailed)
 		return
 	}
 
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
-		b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", "unsupported")
+		b.logger.Info("incoming message", "operation", "bot.handle_message", "operation_id", operationID, "message_type", "unsupported")
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UnsupportedText)
 		return
 	}
@@ -120,27 +123,27 @@ func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int6
 	if commandName == "" {
 		commandName = "plain_text"
 	}
-	b.logger.Info("incoming message", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "message_type", messageType, "command", commandName, "note_length", len(arg))
+	b.logger.Info("incoming message", "operation", "bot.handle_message", "operation_id", operationID, "message_type", messageType, "command", safeCommandName(commandName), "argument_length", len(arg))
 	meta := store.TelegramUpdateMeta{UpdateID: updateID, ChatID: msg.Chat.ID, MessageID: int64(msg.MessageID), TelegramUserID: telegramUserID, UserID: userID, Command: commandName}
 	claim, err := b.svc.ClaimTelegramUpdate(ctx, meta, b.cfg.TelegramUpdateProcessingTimeout)
 	if err != nil {
-		b.logger.Error("telegram update claim failed", "operation", "bot.idempotency_claim", "telegram_update_id", updateID, "telegram_chat_id", msg.Chat.ID, "telegram_message_id", msg.MessageID, "telegram_user_id", telegramUserID, "user_id", userID, "error", err)
+		b.logger.Error("telegram update claim failed", logging.WithSafeError([]any{"operation", "bot.idempotency_claim", "operation_id", operationID}, err)...)
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().GenericError)
 		return
 	}
 	if !claim.Claimed {
 		if claim.Status == store.TelegramUpdateStatusProcessed {
-			b.logger.Info("duplicate processed telegram update skipped", "operation", "bot.idempotency_duplicate_processed", "telegram_update_id", updateID, "telegram_chat_id", msg.Chat.ID, "telegram_message_id", msg.MessageID, "telegram_user_id", telegramUserID, "user_id", userID, "attempt_count", claim.AttemptCount, "status", claim.Status)
+			b.logger.Info("duplicate processed telegram update skipped", "operation", "bot.idempotency_duplicate_processed", "operation_id", operationID, "attempt_count", claim.AttemptCount, "status", claim.Status)
 		} else {
-			b.logger.Info("duplicate in-progress telegram update skipped", "operation", "bot.idempotency_duplicate_in_progress", "telegram_update_id", updateID, "telegram_chat_id", msg.Chat.ID, "telegram_message_id", msg.MessageID, "telegram_user_id", telegramUserID, "user_id", userID, "attempt_count", claim.AttemptCount, "status", claim.Status)
+			b.logger.Info("duplicate in-progress telegram update skipped", "operation", "bot.idempotency_duplicate_in_progress", "operation_id", operationID, "attempt_count", claim.AttemptCount, "status", claim.Status)
 		}
 		return
 	}
 	started := time.Now()
 	if claim.StaleReclaimed {
-		b.logger.Info("stale telegram update reclaimed", "operation", "bot.idempotency_stale_reclaim", "telegram_update_id", updateID, "attempt_count", claim.AttemptCount)
+		b.logger.Info("stale telegram update reclaimed", "operation", "bot.idempotency_stale_reclaim", "operation_id", operationID, "attempt_count", claim.AttemptCount)
 	}
-	b.logger.Info("telegram update claimed", "operation", "bot.idempotency_claim", "telegram_update_id", updateID, "telegram_chat_id", msg.Chat.ID, "telegram_message_id", msg.MessageID, "telegram_user_id", telegramUserID, "user_id", userID, "attempt_count", claim.AttemptCount)
+	b.logger.Info("telegram update claimed", "operation", "bot.idempotency_claim", "operation_id", operationID, "attempt_count", claim.AttemptCount)
 	var response string
 	switch cmd {
 	case "/start", "/help":
@@ -185,14 +188,14 @@ func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int6
 	}
 	if err != nil {
 		_ = b.svc.MarkTelegramUpdateFailed(ctx, meta, claim.ProcessingStartedAt, err)
-		b.logger.Error("telegram update processing failed", "operation", "bot.idempotency_failed", "telegram_update_id", updateID, "duration_ms", time.Since(started).Milliseconds(), "attempt_count", claim.AttemptCount, "error", err)
-		b.logger.Error("command failed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName, "error", err)
+		b.logger.Error("telegram update processing failed", logging.WithSafeError([]any{"operation", "bot.idempotency_failed", "operation_id", operationID, "duration_ms", time.Since(started).Milliseconds(), "attempt_count", claim.AttemptCount}, err)...)
+		b.logger.Error("command failed", logging.WithSafeError([]any{"operation", "bot.handle_message", "operation_id", operationID, "command", safeCommandName(commandName)}, err)...)
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().GenericError)
 		return
 	}
 	reply(msg.Chat.ID, response)
-	b.logger.Info("telegram update processing completed", "operation", "bot.idempotency_completed", "telegram_update_id", updateID, "duration_ms", time.Since(started).Milliseconds(), "attempt_count", claim.AttemptCount, "status", store.TelegramUpdateStatusProcessed)
-	b.logger.Info("command completed", "operation", "bot.handle_message", "telegram_user_id", telegramUserID, "user_id", userID, "command", commandName)
+	b.logger.Info("telegram update processing completed", "operation", "bot.idempotency_completed", "operation_id", operationID, "duration_ms", time.Since(started).Milliseconds(), "attempt_count", claim.AttemptCount, "status", store.TelegramUpdateStatusProcessed)
+	b.logger.Info("command completed", "operation", "bot.handle_message", "operation_id", operationID, "command", safeCommandName(commandName))
 }
 
 func splitCommand(text string) (string, string) {
@@ -217,7 +220,7 @@ func (b *Bot) SendMessage(chatID int64, text string) error {
 
 func (b *Bot) reply(chatID int64, text string) {
 	if err := b.send(chatID, text); err != nil {
-		b.logger.Error("message send failed", "operation", "bot.send_message", "chat_id", chatID, "error", err)
+		b.logger.Error("message send failed", logging.WithSafeError([]any{"operation", "bot.send_message"}, err)...)
 	}
 }
 
@@ -247,4 +250,13 @@ func chunks(s string, max int) []string {
 	}
 	out = append(out, s)
 	return out
+}
+
+func safeCommandName(command string) string {
+	switch command {
+	case "plain_text", "/start", "/help", "/note", "/now", "/open", "/done", "/daily", "/weekly", "/ask", "/ticket":
+		return strings.TrimPrefix(command, "/")
+	default:
+		return "unknown"
+	}
 }
