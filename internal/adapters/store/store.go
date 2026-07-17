@@ -62,6 +62,32 @@ type Store struct {
 	logger *slog.Logger
 }
 
+type WebUser struct {
+	ID       int64
+	Username *string
+}
+type APINote struct {
+	ID               int64
+	RawText          string
+	Summary          *string
+	Tags             []string
+	ProcessingStatus string
+	CreatedAt        time.Time
+}
+type APIAction struct {
+	ID            int64
+	NoteID        *int64
+	Title, Status string
+	PersonName    *string
+	DueAt         *time.Time
+	CreatedAt     time.Time
+	CompletedAt   *time.Time
+}
+type PageCursor struct {
+	CreatedAt time.Time
+	ID        int64
+}
+
 func New(pool *pgxpool.Pool, logger ...*slog.Logger) *Store {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
@@ -91,6 +117,64 @@ func (s *Store) UpsertUser(ctx context.Context, telegramUserID int64, username s
 	return id, err
 }
 
+func (s *Store) WebUserByTelegramID(ctx context.Context, telegramUserID int64) (WebUser, error) {
+	var u WebUser
+	err := s.pool.QueryRow(ctx, `SELECT id, username FROM users WHERE telegram_user_id=$1`, telegramUserID).Scan(&u.ID, &u.Username)
+	return u, err
+}
+
+func (s *Store) ListAPINotes(ctx context.Context, userID int64, limit int, cursor *PageCursor) ([]APINote, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at FROM notes WHERE user_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4`, userID, cursorTime(cursor), cursorID(cursor), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APINote
+	for rows.Next() {
+		var n APINote
+		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+func cursorTime(c *PageCursor) any {
+	if c == nil {
+		return nil
+	}
+	return c.CreatedAt
+}
+func cursorID(c *PageCursor) int64 {
+	if c == nil {
+		return 0
+	}
+	return c.ID
+}
+
+func (s *Store) ListAPIActions(ctx context.Context, userID int64, status string, limit int, cursor *PageCursor) ([]APIAction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT a.id,n.id,a.title,a.status,p.name,a.due_at,a.created_at,a.completed_at FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND ($2='all' OR a.status=$2) AND ($3::timestamptz IS NULL OR (a.created_at,a.id)<($3,$4)) ORDER BY a.created_at DESC,a.id DESC LIMIT $5`, userID, status, cursorTime(cursor), cursorID(cursor), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIAction
+	for rows.Next() {
+		var a APIAction
+		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetActionStatus(ctx context.Context, userID, actionID int64, status string) (APIAction, error) {
+	var a APIAction
+	err := s.pool.QueryRow(ctx, `UPDATE actions SET status=$3,completed_at=CASE WHEN $3='done' THEN COALESCE(completed_at,now()) ELSE NULL END WHERE user_id=$1 AND id=$2 RETURNING id,note_id,title,status,NULL::text,due_at,created_at,completed_at`, userID, actionID, status).Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.DueAt, &a.CreatedAt, &a.CompletedAt)
+	return a, err
+}
+
 func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int64, error) {
 	var noteID int64
 	err := s.pool.QueryRow(ctx, `
@@ -102,6 +186,15 @@ func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int6
 		s.logDBError("store.save_raw_note", err)
 	}
 	return noteID, err
+}
+
+func (s *Store) SaveRawAPINote(ctx context.Context, userID int64, raw string) (APINote, error) {
+	var note APINote
+	err := s.pool.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text) VALUES ($1,$2) RETURNING id,raw_text,summary,tags,processing_status,created_at`, userID, raw).Scan(&note.ID, &note.RawText, &note.Summary, &note.Tags, &note.ProcessingStatus, &note.CreatedAt)
+	if err != nil {
+		s.logDBError("store.save_raw_api_note", err)
+	}
+	return note, err
 }
 
 func (s *Store) CreateAndClaimNoteForEnrichment(ctx context.Context, userID int64, raw string) (NoteForEnrichment, error) {

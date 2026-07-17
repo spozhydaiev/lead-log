@@ -1,0 +1,388 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/spozhydaiev/lead-log/internal/adapters/httpapi/dto"
+	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+)
+
+const maxBody = 64 << 10
+const maxNoteLength = 10000
+
+type Principal struct{ UserID int64 }
+type contextKey int
+
+const (
+	requestIDKey contextKey = iota
+	principalKey
+)
+
+type Service interface {
+	WebUser(context.Context, int64) (store.WebUser, error)
+	CreatePendingNote(context.Context, int64, string) (store.APINote, error)
+	ListNotes(context.Context, int64, int, *store.PageCursor) ([]store.APINote, error)
+	ListActions(context.Context, int64, string, int, *store.PageCursor) ([]store.APIAction, error)
+	SetActionStatus(context.Context, int64, int64, string) (store.APIAction, error)
+}
+type Pinger interface{ Ping(context.Context) error }
+type Config struct {
+	Token                      string
+	TelegramUserID             int64
+	AllowedOrigins             []string
+	ResponseLanguage, Timezone string
+	ReadinessTimeout           time.Duration
+}
+type API struct {
+	service Service
+	db      Pinger
+	cfg     Config
+	logger  *slog.Logger
+	origins map[string]bool
+}
+
+func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handler {
+	if cfg.ReadinessTimeout <= 0 {
+		cfg.ReadinessTimeout = 2 * time.Second
+	}
+	a := &API{service: service, db: db, cfg: cfg, logger: logger, origins: map[string]bool{}}
+	for _, o := range cfg.AllowedOrigins {
+		a.origins[o] = true
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("GET /readyz", a.ready)
+	mux.Handle("GET /api/v1/me", a.auth(http.HandlerFunc(a.me)))
+	mux.Handle("GET /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
+	mux.Handle("POST /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
+	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
+	mux.Handle("PATCH /api/v1/actions/{id}", a.auth(http.HandlerFunc(a.patchAction)))
+	return a.middleware(mux)
+}
+
+func (a *API) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if len(id) < 8 || len(id) > 128 {
+			id = newID()
+		}
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		r = r.WithContext(ctx)
+		w.Header().Set("X-Request-ID", id)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if origin := r.Header.Get("Origin"); origin != "" && a.origins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+		}
+		if r.Method == http.MethodOptions {
+			if !a.origins[r.Header.Get("Origin")] {
+				writeError(w, r, http.StatusForbidden, "forbidden", "The request is not allowed.")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		rw := &responseWriter{ResponseWriter: w, status: 200}
+		start := time.Now()
+		defer func() {
+			if recover() != nil {
+				writeError(rw, r, http.StatusInternalServerError, "internal_error", "An internal error occurred.")
+			}
+			a.logger.Info("HTTP request", "operation", "request", "operation_id", id, "method", r.Method, "route", route(r), "status", rw.status, "response_size", rw.size, "duration_ms", time.Since(start).Milliseconds())
+		}()
+		next.ServeHTTP(rw, r)
+	})
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	status, size int
+}
+
+func (w *responseWriter) WriteHeader(s int) { w.status = s; w.ResponseWriter.WriteHeader(s) }
+func (w *responseWriter) Write(b []byte) (int, error) {
+	n, e := w.ResponseWriter.Write(b)
+	w.size += n
+	return n, e
+}
+func route(r *http.Request) string {
+	if r.Pattern != "" {
+		p := strings.SplitN(r.Pattern, " ", 2)
+		if len(p) == 2 {
+			return p[1]
+		}
+	}
+	return "unmatched"
+}
+func newID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func (a *API) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := r.Header.Get("Authorization")
+		parts := strings.SplitN(h, " ", 2)
+		if len(parts) != 2 || parts[0] != "Bearer" || len(parts[1]) != len(a.cfg.Token) || subtle.ConstantTimeCompare([]byte(parts[1]), []byte(a.cfg.Token)) != 1 {
+			writeError(w, r, 401, "unauthorized", "Authentication is required.")
+			return
+		}
+		u, err := a.service.WebUser(r.Context(), a.cfg.TelegramUserID)
+		if err != nil {
+			writeError(w, r, 401, "unauthorized", "Authentication is required.")
+			return
+		}
+		w.Header().Set("Pragma", "no-cache")
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, Principal{UserID: u.ID})))
+	})
+}
+func principal(r *http.Request) (Principal, bool) {
+	p, ok := r.Context().Value(principalKey).(Principal)
+	return p, ok && p.UserID > 0
+}
+func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+func (a *API) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.ReadinessTimeout)
+	defer cancel()
+	if a.db == nil || a.db.Ping(ctx) != nil {
+		writeJSON(w, 503, map[string]string{"status": "not_ready"})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ready"})
+}
+func (a *API) me(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	u, err := a.service.WebUser(r.Context(), a.cfg.TelegramUserID)
+	if err != nil || u.ID != p.UserID {
+		internal(w, r)
+		return
+	}
+	name := ""
+	if u.Username != nil {
+		name = *u.Username
+	}
+	writeJSON(w, 200, map[string]any{"data": dto.Me{DisplayName: name, ResponseLanguage: a.cfg.ResponseLanguage, Timezone: a.cfg.Timezone}})
+}
+
+func (a *API) notes(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	if r.Method == http.MethodPost {
+		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			writeError(w, r, 415, "unsupported_media_type", "Content-Type must be application/json.")
+			return
+		}
+		var in struct {
+			Text string `json:"text"`
+		}
+		if code := decode(w, r, &in); code != "" {
+			return
+		}
+		in.Text = strings.TrimSpace(in.Text)
+		if in.Text == "" || len([]rune(in.Text)) > maxNoteLength {
+			validation(w, r)
+			return
+		}
+		n, err := a.service.CreatePendingNote(r.Context(), p.UserID, in.Text)
+		if err != nil {
+			internal(w, r)
+			return
+		}
+		writeJSON(w, 201, map[string]any{"data": map[string]any{"id": publicID("note", n.ID), "processing_status": n.ProcessingStatus, "created_at": n.CreatedAt}})
+		return
+	}
+	limit, cursor, ok := page(r)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	items, err := a.service.ListNotes(r.Context(), p.UserID, limit+1, cursor)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	next := nextCursorNotes(items, limit)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]dto.Note, 0, len(items))
+	for _, n := range items {
+		tags := n.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		out = append(out, dto.Note{ID: publicID("note", n.ID), RawText: n.RawText, Summary: n.Summary, Tags: tags, ProcessingStatus: n.ProcessingStatus, CreatedAt: n.CreatedAt})
+	}
+	writeJSON(w, 200, map[string]any{"data": out, "pagination": dto.Pagination{Limit: limit, NextCursor: next}})
+}
+func (a *API) actions(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "open"
+	}
+	if status != "open" && status != "done" && status != "all" {
+		validation(w, r)
+		return
+	}
+	limit, cursor, ok := page(r)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	items, err := a.service.ListActions(r.Context(), p.UserID, status, limit+1, cursor)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	next := nextCursorActions(items, limit)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]dto.Action, 0, len(items))
+	for _, x := range items {
+		out = append(out, mapAction(x))
+	}
+	writeJSON(w, 200, map[string]any{"data": out, "pagination": dto.Pagination{Limit: limit, NextCursor: next}})
+}
+func (a *API) patchAction(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	id, ok := parsePublicID(r.PathValue("id"), "action")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	var in struct {
+		Status string `json:"status"`
+	}
+	if decode(w, r, &in) != "" {
+		return
+	}
+	if in.Status != "open" && in.Status != "done" {
+		validation(w, r)
+		return
+	}
+	x, err := a.service.SetActionStatus(r.Context(), p.UserID, id, in.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": mapAction(x)})
+}
+
+func mapAction(x store.APIAction) dto.Action {
+	var person *dto.LinkedPerson
+	if x.PersonName != nil {
+		person = &dto.LinkedPerson{DisplayName: *x.PersonName}
+	}
+	var note *string
+	if x.NoteID != nil {
+		s := publicID("note", *x.NoteID)
+		note = &s
+	}
+	return dto.Action{ID: publicID("action", x.ID), Title: x.Title, Status: x.Status, LinkedPerson: person, DueAt: x.DueAt, CreatedAt: x.CreatedAt, CompletedAt: x.CompletedAt, SourceNoteID: note}
+}
+func publicID(prefix string, id int64) string { return fmt.Sprintf("%s_%d", prefix, id) }
+func parsePublicID(raw, prefix string) (int64, bool) {
+	v, err := strconv.ParseInt(strings.TrimPrefix(raw, prefix+"_"), 10, 64)
+	return v, err == nil && v > 0 && strings.HasPrefix(raw, prefix+"_")
+}
+func page(r *http.Request) (int, *store.PageCursor, bool) {
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		v, e := strconv.Atoi(raw)
+		if e != nil || v < 1 || v > 100 {
+			return 0, nil, false
+		}
+		limit = v
+	}
+	raw := r.URL.Query().Get("cursor")
+	if raw == "" {
+		return limit, nil, true
+	}
+	b, e := base64.RawURLEncoding.DecodeString(raw)
+	if e != nil {
+		return 0, nil, false
+	}
+	var c store.PageCursor
+	if json.Unmarshal(b, &c) != nil || c.ID <= 0 || c.CreatedAt.IsZero() {
+		return 0, nil, false
+	}
+	return limit, &c, true
+}
+func encodeCursor(t time.Time, id int64) *string {
+	b, _ := json.Marshal(store.PageCursor{CreatedAt: t, ID: id})
+	s := base64.RawURLEncoding.EncodeToString(b)
+	return &s
+}
+func nextCursorNotes(v []store.APINote, l int) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	return encodeCursor(x.CreatedAt, x.ID)
+}
+func nextCursorActions(v []store.APIAction, l int) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	return encodeCursor(x.CreatedAt, x.ID)
+}
+func decode(w http.ResponseWriter, r *http.Request, d any) string {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(d); err != nil {
+		if strings.Contains(err.Error(), "request body too large") {
+			writeError(w, r, 413, "request_too_large", "The request is too large.")
+			return "large"
+		}
+		validation(w, r)
+		return "invalid"
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		validation(w, r)
+		return "invalid"
+	}
+	return ""
+}
+func validation(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, 400, "validation_error", "The request is invalid.")
+}
+func internal(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, 500, "internal_error", "An internal error occurred.")
+}
+func writeError(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg, "request_id": requestID(r)}})
+}
+func requestID(r *http.Request) string { s, _ := r.Context().Value(requestIDKey).(string); return s }
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
