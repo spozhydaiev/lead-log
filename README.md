@@ -197,3 +197,13 @@ Each incoming Telegram operation or background job receives a random `operation_
 Errors logged through the application use safe error fields. Provider HTTP error bodies and database error messages are not emitted as raw log text; logs keep stable classes such as `llm_http_error`, `database_error`, or `daily_digest_validation` plus safe operational metadata.
 
 Debug logs follow the same privacy rules as info/warn/error logs. There is no production flag that re-enables sensitive logging.
+
+## Private web HTTP API (v1 foundation)
+
+The optional HTTP adapter runs alongside Telegram polling, the scheduler, and enrichment worker and calls the same application service/store boundary. Set `HTTP_ENABLED=false` to disable it. With HTTP enabled (the default), configure `HTTP_ADDRESS` (default `0.0.0.0`), `HTTP_PORT` (`8080`), `HTTP_READ_TIMEOUT` (`10s`), `HTTP_WRITE_TIMEOUT` (`30s`), `HTTP_IDLE_TIMEOUT` (`60s`), `HTTP_ALLOWED_ORIGINS` (comma-separated exact origins), `WEB_API_TOKEN`, and `WEB_API_TELEGRAM_USER_ID`. The mapped Telegram identity must already be in `ALLOWED_TELEGRAM_USER_IDS`; it is resolved server-side and is never accepted from API input or returned by `/me`.
+
+Bearer token authentication is temporary and intended for private MVP use. It should be replaced before public multi-user launch.
+
+The API provides unauthenticated `GET /healthz` and bounded-database-check `GET /readyz`, plus authenticated `/api/v1/me`, notes list/create, and actions list/status-update endpoints. Authenticated responses use `Cache-Control: no-store`; CORS uses exact configured origins, never a wildcard. Lists use opaque cursor pagination ordered by `(created_at DESC, id DESC)`. Public representations are prefixed (`note_123`, `action_31`), but are not a security boundary; every query and mutation is scoped to the backend-derived user.
+
+`POST /api/v1/notes` stores a pending note for the existing worker and does not wait for the LLM. POST /notes is not idempotent in API v1 foundation. Frontend must avoid automatic retries until Idempotency-Key support is added. Distributed rate limiting is also required before a public launch; this private foundation instead bounds request bodies, headers, timeouts, and page sizes. The source-controlled contract is `api/openapi.yaml`.

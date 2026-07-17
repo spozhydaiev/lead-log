@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: Lead Log private web API
+  version: 1.0.0
+  description: Private single-user MVP API. Authenticated responses use Cache-Control no-store.
+servers: [{url: /}]
+security: [{bearerAuth: []}]
+paths:
+  /healthz:
+    get:
+      security: []
+      responses: {'200': {description: Process is alive, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}}
+  /readyz:
+    get:
+      security: []
+      responses:
+        '200': {description: Database is ready, content: {application/json: {schema: {$ref: '#/components/schemas/Ready'}}}}
+        '503': {description: Database is unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/Ready'}}}}
+  /api/v1/me:
+    get:
+      responses:
+        '200': {description: Safe current-user profile, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/Me'}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/notes:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Stable newest-first page, content: {application/json: {schema: {$ref: '#/components/schemas/NoteList'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      description: Creates a pending note without waiting for LLM enrichment. Not idempotent in API v1.
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [text], properties: {text: {type: string, minLength: 1, maxLength: 10000}}, example: {text: Discuss retry policy with the team.}}}}}
+      responses:
+        '201': {description: Pending note created, content: {application/json: {schema: {type: object, properties: {data: {$ref: '#/components/schemas/NoteCreated'}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '413': {description: Request too large, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+        '415': {description: Unsupported media type, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  /api/v1/actions:
+    get:
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, done, all], default: open}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Stable newest-first page, content: {application/json: {schema: {$ref: '#/components/schemas/ActionList'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/actions/{id}:
+    patch:
+      parameters: [{name: id, in: path, required: true, schema: {type: string, pattern: '^action_[1-9][0-9]*$'}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [status], properties: {status: {type: string, enum: [open, done]}}}}}}
+      responses:
+        '200': {description: Updated action, content: {application/json: {schema: {type: object, properties: {data: {$ref: '#/components/schemas/Action'}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Action absent in the authenticated user's scope, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  headers:
+    NoStore: {schema: {type: string, const: no-store}}
+  parameters:
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    Cursor: {name: cursor, in: query, description: Opaque cursor, schema: {type: string}}
+  responses:
+    Unauthorized: {description: Authentication failed without disclosing why, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+    BadRequest: {description: Invalid input, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  schemas:
+    Health: {type: object, required: [status], properties: {status: {const: ok}}}
+    Ready: {type: object, required: [status], properties: {status: {enum: [ready, not_ready]}}}
+    Me: {type: object, required: [response_language, timezone], properties: {display_name: {type: string}, response_language: {type: string}, timezone: {type: string}}}
+    Pagination: {type: object, required: [limit, next_cursor], properties: {limit: {type: integer}, next_cursor: {type: [string, 'null']}}}
+    Note: {type: object, required: [id, raw_text, tags, processing_status, created_at], properties: {id: {type: string, example: note_123}, raw_text: {type: string}, summary: {type: [string, 'null']}, tags: {type: array, items: {type: string}}, processing_status: {enum: [pending, processing, processed, failed]}, created_at: {type: string, format: date-time}}}
+    NoteCreated: {type: object, required: [id, processing_status, created_at], properties: {id: {type: string}, processing_status: {const: pending}, created_at: {type: string, format: date-time}}}
+    NoteList: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Note'}}, pagination: {$ref: '#/components/schemas/Pagination'}}}
+    Person: {type: object, required: [display_name], properties: {display_name: {type: string}}}
+    Action: {type: object, required: [id, title, status, created_at], properties: {id: {type: string, example: action_31}, title: {type: string}, status: {enum: [open, done]}, linked_person: {oneOf: [{$ref: '#/components/schemas/Person'}, {type: 'null'}]}, due_at: {type: [string, 'null'], format: date-time}, created_at: {type: string, format: date-time}, completed_at: {type: [string, 'null'], format: date-time}, source_note_id: {type: [string, 'null']}}}
+    ActionList: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Action'}}, pagination: {$ref: '#/components/schemas/Pagination'}}}
+    APIError: {type: object, required: [code, message, request_id], properties: {code: {enum: [unauthorized, forbidden, validation_error, not_found, conflict, request_too_large, unsupported_media_type, internal_error, service_unavailable]}, message: {type: string}, request_id: {type: string}}}
+    ErrorEnvelope: {type: object, required: [error], properties: {error: {$ref: '#/components/schemas/APIError'}}}

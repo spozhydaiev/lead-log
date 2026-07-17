@@ -33,6 +33,15 @@ type Config struct {
 	NoteEnrichmentBatchSize         int
 	NoteEnrichmentWorkerConcurrency int
 	NoteEnrichmentMaxAttempts       int
+	HTTPEnabled                     bool
+	HTTPAddress                     string
+	HTTPPort                        int
+	HTTPReadTimeout                 time.Duration
+	HTTPWriteTimeout                time.Duration
+	HTTPIdleTimeout                 time.Duration
+	HTTPAllowedOrigins              []string
+	WebAPIToken                     string
+	WebAPITelegramUserID            int64
 }
 
 func Load() Config {
@@ -74,7 +83,7 @@ func Load() Config {
 		panic(err.Error())
 	}
 
-	return Config{
+	cfg := Config{
 		TelegramBotToken:                mustEnv("TELEGRAM_BOT_TOKEN"),
 		DatabaseURL:                     mustEnv("DATABASE_URL"),
 		LLMBaseURL:                      envOr("LLM_BASE_URL", "https://api.openai.com/v1"),
@@ -96,7 +105,46 @@ func Load() Config {
 		NoteEnrichmentBatchSize:         noteEnrichmentBatchSize,
 		NoteEnrichmentWorkerConcurrency: noteEnrichmentWorkerConcurrency,
 		NoteEnrichmentMaxAttempts:       noteEnrichmentMaxAttempts,
+		HTTPEnabled:                     parseBool(envOr("HTTP_ENABLED", "true")),
+		HTTPAddress:                     envOr("HTTP_ADDRESS", "0.0.0.0"),
+		HTTPPort:                        parsePositiveInt("HTTP_PORT", 8080),
+		HTTPReadTimeout:                 parseDuration("HTTP_READ_TIMEOUT", "10s"),
+		HTTPWriteTimeout:                parseDuration("HTTP_WRITE_TIMEOUT", "30s"),
+		HTTPIdleTimeout:                 parseDuration("HTTP_IDLE_TIMEOUT", "60s"),
+		HTTPAllowedOrigins:              parseCSV(os.Getenv("HTTP_ALLOWED_ORIGINS")),
 	}
+	if cfg.HTTPEnabled {
+		cfg.WebAPIToken = mustEnv("WEB_API_TOKEN")
+		id, parseErr := strconv.ParseInt(mustEnv("WEB_API_TELEGRAM_USER_ID"), 10, 64)
+		if parseErr != nil || id <= 0 || !IsTelegramUserAllowed(cfg.AllowedTelegramUserIDs, id) {
+			panic("invalid env var WEB_API_TELEGRAM_USER_ID: must identify an allowed Telegram user")
+		}
+		cfg.WebAPITelegramUserID = id
+		for _, origin := range cfg.HTTPAllowedOrigins {
+			if origin == "*" {
+				panic("invalid env var HTTP_ALLOWED_ORIGINS: wildcard is not allowed")
+			}
+		}
+	}
+	return cfg
+}
+
+func parseDuration(key, fallback string) time.Duration {
+	d, err := time.ParseDuration(envOr(key, fallback))
+	if err != nil || d <= 0 {
+		panic("invalid env var " + key + ": must be a positive duration")
+	}
+	return d
+}
+
+func parseCSV(raw string) []string {
+	var out []string
+	for _, v := range strings.Split(raw, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func mustEnv(key string) string {

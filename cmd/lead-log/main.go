@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/bot"
+	"github.com/spozhydaiev/lead-log/internal/adapters/httpapi"
 	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
 	"github.com/spozhydaiev/lead-log/internal/config"
@@ -43,6 +45,7 @@ func main() {
 		"note_enrichment_max_attempts", cfg.NoteEnrichmentMaxAttempts,
 		"allowlist_configured", len(cfg.AllowedTelegramUserIDs) > 0,
 		"allowlist_size", len(cfg.AllowedTelegramUserIDs),
+		"http_enabled", cfg.HTTPEnabled,
 	)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
@@ -62,6 +65,16 @@ func main() {
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ResponseLanguage, logger.With("component", "llm"))
 
 	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithNoteEnrichmentStaleTimeout(cfg.NoteEnrichmentProcessingTimeout), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
+
+	var httpServerErr <-chan error
+	if cfg.HTTPEnabled {
+		handler := httpapi.New(service, pool, httpapi.Config{Token: cfg.WebAPIToken, TelegramUserID: cfg.WebAPITelegramUserID, AllowedOrigins: cfg.HTTPAllowedOrigins, ResponseLanguage: string(cfg.ResponseLanguage), Timezone: cfg.DailySummaryTimezone}, logger.With("component", "http_api"))
+		srv := httpapi.NewServer(httpapi.ServerConfig{Address: fmt.Sprintf("%s:%d", cfg.HTTPAddress, cfg.HTTPPort), ReadTimeout: cfg.HTTPReadTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: cfg.HTTPIdleTimeout}, handler)
+		ch := make(chan error, 1)
+		httpServerErr = ch
+		go func() { ch <- httpapi.RunServer(ctx, srv) }()
+		logger.Info("HTTP API starting", "component", "http_api", "operation", "http.start")
+	}
 
 	telegramBot, err := bot.New(cfg, service, logger.With("component", "bot"))
 	if err != nil {
@@ -83,8 +96,28 @@ func main() {
 		go dailyScheduler.Run(ctx)
 	}
 
-	if err := telegramBot.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Error("bot stopped", logging.WithSafeError([]any{"component", "bot", "operation", "bot.run"}, err)...)
-		os.Exit(1)
+	botErr := make(chan error, 1)
+	go func() { botErr <- telegramBot.Run(ctx) }()
+	httpFinished := false
+	select {
+	case err := <-botErr:
+		if err != nil && ctx.Err() == nil {
+			logger.Error("bot stopped", logging.WithSafeError([]any{"component", "bot", "operation", "bot.run"}, err)...)
+			stop()
+		}
+	case err := <-httpServerErr:
+		httpFinished = true
+		if err != nil && ctx.Err() == nil {
+			logger.Error("HTTP API stopped", logging.WithSafeError([]any{"component", "http_api", "operation", "http.run"}, err)...)
+			stop()
+		}
+	case <-ctx.Done():
+	}
+	<-ctx.Done()
+	// Let the HTTP server finish graceful shutdown before pool.Close runs.
+	if cfg.HTTPEnabled && !httpFinished {
+		if err := <-httpServerErr; err != nil {
+			logger.Error("HTTP API shutdown failed", logging.WithSafeError([]any{"component", "http_api", "operation", "http.shutdown"}, err)...)
+		}
 	}
 }

@@ -130,6 +130,22 @@ func (s *Service) CaptureNote(ctx context.Context, userID int64, raw string) (st
 	return s.language.CommonMessages().SavedRaw, nil
 }
 
+func (s *Service) CreatePendingNote(ctx context.Context, userID int64, raw string) (store.APINote, error) {
+	return s.store.SaveRawAPINote(ctx, userID, raw)
+}
+func (s *Service) WebUser(ctx context.Context, telegramID int64) (store.WebUser, error) {
+	return s.store.WebUserByTelegramID(ctx, telegramID)
+}
+func (s *Service) ListNotes(ctx context.Context, userID int64, limit int, c *store.PageCursor) ([]store.APINote, error) {
+	return s.store.ListAPINotes(ctx, userID, limit, c)
+}
+func (s *Service) ListActions(ctx context.Context, userID int64, status string, limit int, c *store.PageCursor) ([]store.APIAction, error) {
+	return s.store.ListAPIActions(ctx, userID, status, limit, c)
+}
+func (s *Service) SetActionStatus(ctx context.Context, userID, id int64, status string) (store.APIAction, error) {
+	return s.store.SetActionStatus(ctx, userID, id, status)
+}
+
 func (s *Service) AddNote(ctx context.Context, userID int64, raw string) (string, error) {
 	claim, err := s.store.CreateAndClaimNoteForEnrichment(ctx, userID, raw)
 	if err != nil {
