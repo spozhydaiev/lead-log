@@ -163,7 +163,7 @@ func (s *Store) searchStructured(ctx context.Context, userID int64, kind models.
 	switch kind {
 	case models.RetrievalKindAction:
 		args = append(args, f.ActionStatuses)
-		sql = fmt.Sprintf(`WITH x AS (SELECT a.id,a.user_id,COALESCE(a.note_id,0) note_id,COALESCE(n.created_at,a.created_at) created_at,a.title body,a.title title,a.status, a.linked_person_id person_id, COALESCE(p.name,'') person_name FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND ($3::timestamptz IS NULL OR COALESCE(n.created_at,a.created_at)>=$3) AND ($4::timestamptz IS NULL OR COALESCE(n.created_at,a.created_at)<$4) AND ($5::bigint IS NULL OR a.linked_person_id=$5) AND (cardinality($7::text[])=0 OR a.status=ANY($7))) SELECT *, %s score FROM x WHERE $2='' OR lower(body) LIKE '%%'||lower($2)||'%%' OR similarity(body,$2)>=0.2 ORDER BY score DESC, created_at DESC LIMIT $6`, scoreExpr)
+		sql = fmt.Sprintf(`WITH x AS (SELECT a.id,a.user_id,COALESCE(a.note_id,0) note_id,COALESCE(n.created_at,a.created_at) created_at,a.title body,a.title title,a.status, a.linked_person_id person_id, COALESCE(p.name,'') person_name, a.due_at FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND ($3::timestamptz IS NULL OR COALESCE(n.created_at,a.created_at)>=$3) AND ($4::timestamptz IS NULL OR COALESCE(n.created_at,a.created_at)<$4) AND ($5::bigint IS NULL OR a.linked_person_id=$5) AND (cardinality($7::text[])=0 OR a.status=ANY($7))) SELECT *, %s score FROM x WHERE $2='' OR lower(body) LIKE '%%'||lower($2)||'%%' OR similarity(body,$2)>=0.2 ORDER BY score DESC, created_at DESC LIMIT $6`, scoreExpr)
 	case models.RetrievalKindPeopleNote:
 		args = append(args, f.PeopleNoteTypes)
 		sql = fmt.Sprintf(`WITH x AS (SELECT pn.id,pn.user_id,COALESCE(pn.note_id,0) note_id,COALESCE(n.created_at,pn.created_at) created_at,pn.text body,COALESCE(pn.theme,pn.type) title,pn.type status,pn.person_id,COALESCE(p.name,'') person_name FROM people_notes pn JOIN people p ON p.id=pn.person_id AND p.user_id=pn.user_id LEFT JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id WHERE pn.user_id=$1 AND ($3::timestamptz IS NULL OR COALESCE(n.created_at,pn.created_at)>=$3) AND ($4::timestamptz IS NULL OR COALESCE(n.created_at,pn.created_at)<$4) AND ($5::bigint IS NULL OR pn.person_id=$5) AND (cardinality($7::text[])=0 OR pn.type=ANY($7))) SELECT *, %s score FROM x WHERE $2='' OR lower(body||' '||title) LIKE '%%'||lower($2)||'%%' OR similarity(body,$2)>=0.2 ORDER BY score DESC, created_at DESC LIMIT $6`, scoreExpr)
@@ -180,7 +180,11 @@ func (s *Store) searchStructured(ctx context.Context, userID int64, kind models.
 	for rows.Next() {
 		var it models.RetrievalItem
 		var pid *int64
-		if err := rows.Scan(&it.RecordID, &it.UserID, &it.SourceNoteID, &it.CreatedAt, &it.Text, &it.Title, &it.Status, &pid, &it.PersonName, &it.Score); err != nil {
+		if kind == models.RetrievalKindAction {
+			if err := rows.Scan(&it.RecordID, &it.UserID, &it.SourceNoteID, &it.CreatedAt, &it.Text, &it.Title, &it.Status, &pid, &it.PersonName, &it.DueAt, &it.Score); err != nil {
+				return nil, err
+			}
+		} else if err := rows.Scan(&it.RecordID, &it.UserID, &it.SourceNoteID, &it.CreatedAt, &it.Text, &it.Title, &it.Status, &pid, &it.PersonName, &it.Score); err != nil {
 			return nil, err
 		}
 		it.Kind = kind

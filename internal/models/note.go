@@ -116,6 +116,49 @@ type PersonContextSource struct {
 	Date   time.Time
 }
 
+type AgendaItemKind string
+
+const (
+	AgendaItemOpenAction   AgendaItemKind = "open_action"
+	AgendaItemCommitment   AgendaItemKind = "commitment"
+	AgendaItemFollowUp     AgendaItemKind = "follow_up"
+	AgendaItemOpenQuestion AgendaItemKind = "open_question"
+	AgendaItemConcern      AgendaItemKind = "concern"
+	AgendaItemDecision     AgendaItemKind = "decision"
+	AgendaItemAchievement  AgendaItemKind = "achievement"
+	AgendaItemContext      AgendaItemKind = "context"
+)
+
+type AgendaPriority string
+
+const (
+	AgendaPriorityHigh   AgendaPriority = "high"
+	AgendaPriorityNormal AgendaPriority = "normal"
+	AgendaPriorityLow    AgendaPriority = "low"
+)
+
+type AgendaItem struct {
+	Kind         AgendaItemKind
+	Text         string
+	SourceNoteID int64
+	SourceDate   time.Time
+	ActionID     *int64
+	DueAt        *time.Time
+	Priority     AgendaPriority
+	IsInferred   bool
+}
+type AgendaSource struct {
+	NoteID int64
+	Date   time.Time
+}
+type PersonAgenda struct {
+	CanonicalName                                                            string
+	GeneratedAt                                                              time.Time
+	MustDiscuss, FollowUps, OpenQuestions, Decisions, PositiveNotes, Context []AgendaItem
+	Sources                                                                  []AgendaSource
+	HiddenMustDiscuss                                                        int
+}
+
 type DecisionRecord struct {
 	ID               int64
 	UserID           int64

@@ -45,7 +45,8 @@ func (s *Service) Person(ctx context.Context, userID int64, arg string) (string,
 
 func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName string) (models.PersonContext, bool, error) {
 	started := time.Now()
-	since := time.Now().AddDate(0, 0, -PersonContextDays)
+	since := time.Now().AddDate(0, 0, -60)
+	contextSince := time.Now().AddDate(0, 0, -PersonContextDays)
 	log := s.logger.With("component", "person_context", "operation", "retrieve", "operation_id", logging.OperationID(ctx))
 	p, err := s.store.ResolvePerson(ctx, userID, inputName)
 	if err != nil {
@@ -70,11 +71,11 @@ func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName 
 	if err != nil {
 		return out, true, err
 	}
-	done, err := s.Retrieve(ctx, models.RetrievalQuery{UserID: userID, From: &since, Kinds: []models.RetrievalKind{models.RetrievalKindAction}, PersonID: &pid, ActionStatuses: []string{"done"}, Limit: PersonCompletedActionsLimit})
+	done, err := s.Retrieve(ctx, models.RetrievalQuery{UserID: userID, From: &contextSince, Kinds: []models.RetrievalKind{models.RetrievalKindAction}, PersonID: &pid, ActionStatuses: []string{"done"}, Limit: PersonCompletedActionsLimit})
 	if err != nil {
 		return out, true, err
 	}
-	dec, err := s.Retrieve(ctx, models.RetrievalQuery{UserID: userID, From: &since, Kinds: []models.RetrievalKind{models.RetrievalKindDecision}, PersonID: &pid, Limit: PersonDecisionsLimit})
+	dec, err := s.Retrieve(ctx, models.RetrievalQuery{UserID: userID, From: &contextSince, Kinds: []models.RetrievalKind{models.RetrievalKindDecision}, PersonID: &pid, DecisionStatuses: []string{models.DecisionStatusActive}, Limit: PersonDecisionsLimit})
 	if err != nil {
 		return out, true, err
 	}
@@ -83,7 +84,7 @@ func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName 
 		return out, true, err
 	}
 	out.LastMentionAt = last
-	cnt, err := s.store.CountPersonMentionsSince(ctx, userID, pid, since)
+	cnt, err := s.store.CountPersonMentionsSince(ctx, userID, pid, contextSince)
 	if err != nil {
 		return out, true, err
 	}
@@ -96,11 +97,11 @@ func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName 
 		decisionKeys[dedupeKey(d.SourceNoteID, d.Text)] = true
 	}
 	for _, a := range open {
-		out.OpenActions = append(out.OpenActions, models.PersonContextAction{ID: a.RecordID, Title: a.Title, Status: a.Status, SourceNoteID: a.SourceNoteID, Date: a.CreatedAt})
+		out.OpenActions = append(out.OpenActions, models.PersonContextAction{ID: a.RecordID, Title: a.Title, Status: a.Status, SourceNoteID: a.SourceNoteID, Date: a.CreatedAt, DueAt: a.DueAt})
 		structuredNotes[a.SourceNoteID] = true
 	}
 	for _, a := range done {
-		out.CompletedActions = append(out.CompletedActions, models.PersonContextAction{ID: a.RecordID, Title: a.Title, Status: a.Status, SourceNoteID: a.SourceNoteID, Date: a.CreatedAt})
+		out.CompletedActions = append(out.CompletedActions, models.PersonContextAction{ID: a.RecordID, Title: a.Title, Status: a.Status, SourceNoteID: a.SourceNoteID, Date: a.CreatedAt, DueAt: a.DueAt})
 		structuredNotes[a.SourceNoteID] = true
 	}
 	for _, it := range pn {
@@ -114,7 +115,7 @@ func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName 
 			out.Commitments = append(out.Commitments, item)
 		case "follow_up_needed", "follow_up":
 			out.FollowUps = append(out.FollowUps, item)
-		case "feedback", "positive_signal", "growth_topic", "review_evidence":
+		case "feedback", "positive_signal", "growth_topic", "review_evidence", "collaboration":
 			out.Feedback = append(out.Feedback, item)
 		case "achievement":
 			out.Achievements = append(out.Achievements, item)
@@ -130,7 +131,7 @@ func (s *Service) GetPersonContext(ctx context.Context, userID int64, inputName 
 	}
 	aliases, _ := s.store.ListPersonAliases(ctx, userID, pid, 20)
 	aliases = append(aliases, p.Name)
-	fb, err := s.store.SearchRecentNotesByAliases(ctx, userID, aliases, since, PersonFallbackNotesLimit)
+	fb, err := s.store.SearchRecentNotesByAliases(ctx, userID, aliases, contextSince, PersonFallbackNotesLimit)
 	if err != nil {
 		return out, true, err
 	}
@@ -208,6 +209,7 @@ func personSources(pc models.PersonContext, limit int) []models.PersonContextSou
 }
 
 func formatPersonContext(pc models.PersonContext, lang models.ResponseLanguage) string {
+	pc = personContextWithin(pc, time.Now().AddDate(0, 0, -PersonContextDays))
 	m := lang.CommonMessages()
 	if pc.LastMentionAt == nil && len(pc.Sources) == 0 {
 		return fmt.Sprintf(m.PersonNoContext, pc.CanonicalName)
@@ -246,6 +248,28 @@ func formatPersonContext(pc models.PersonContext, lang models.ResponseLanguage) 
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func personContextWithin(pc models.PersonContext, since time.Time) models.PersonContext {
+	filterItems := func(xs []models.PersonContextItem) []models.PersonContextItem {
+		out := make([]models.PersonContextItem, 0, len(xs))
+		for _, x := range xs {
+			if !x.Date.Before(since) {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	pc.RecentNotes = filterItems(pc.RecentNotes)
+	pc.Commitments = filterItems(pc.Commitments)
+	pc.FollowUps = filterItems(pc.FollowUps)
+	pc.Feedback = filterItems(pc.Feedback)
+	pc.Achievements = filterItems(pc.Achievements)
+	pc.Concerns = filterItems(pc.Concerns)
+	pc.OpenQuestions = filterItems(pc.OpenQuestions)
+	pc.PossibleMentions = filterItems(pc.PossibleMentions)
+	pc.Sources = personSources(pc, PersonSourceLimit)
+	return pc
 }
 func writePersonActions(b *strings.Builder, title string, xs []models.PersonContextAction) {
 	if len(xs) == 0 {
