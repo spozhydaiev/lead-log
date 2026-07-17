@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/httpapi/dto"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/services"
 )
 
 const maxBody = 64 << 10
@@ -37,6 +38,8 @@ type Service interface {
 	ListNotes(context.Context, int64, int, *store.PageCursor) ([]store.APINote, error)
 	ListActions(context.Context, int64, string, int, *store.PageCursor) ([]store.APIAction, error)
 	SetActionStatus(context.Context, int64, int64, string) (store.APIAction, error)
+	GetToday(context.Context, int64, time.Time) (services.TodayView, error)
+	GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error)
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
@@ -45,6 +48,7 @@ type Config struct {
 	AllowedOrigins             []string
 	ResponseLanguage, Timezone string
 	ReadinessTimeout           time.Duration
+	Now                        func() time.Time
 }
 type API struct {
 	service Service
@@ -58,6 +62,9 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	if cfg.ReadinessTimeout <= 0 {
 		cfg.ReadinessTimeout = 2 * time.Second
 	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	a := &API{service: service, db: db, cfg: cfg, logger: logger, origins: map[string]bool{}}
 	for _, o := range cfg.AllowedOrigins {
 		a.origins[o] = true
@@ -67,6 +74,8 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.HandleFunc("GET /readyz", a.ready)
 	mux.Handle("GET /api/v1/me", a.auth(http.HandlerFunc(a.me)))
 	mux.Handle("GET /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
+	mux.Handle("GET /api/v1/notes/{id}", a.auth(http.HandlerFunc(a.noteDetail)))
+	mux.Handle("GET /api/v1/today", a.auth(http.HandlerFunc(a.today)))
 	mux.Handle("POST /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
 	mux.Handle("PATCH /api/v1/actions/{id}", a.auth(http.HandlerFunc(a.patchAction)))
@@ -297,6 +306,9 @@ func mapAction(x store.APIAction) dto.Action {
 	var person *dto.LinkedPerson
 	if x.PersonName != nil {
 		person = &dto.LinkedPerson{DisplayName: *x.PersonName}
+		if x.PersonID != nil {
+			person.ID = publicID("person", *x.PersonID)
+		}
 	}
 	var note *string
 	if x.NoteID != nil {
@@ -304,6 +316,98 @@ func mapAction(x store.APIAction) dto.Action {
 		note = &s
 	}
 	return dto.Action{ID: publicID("action", x.ID), Title: x.Title, Status: x.Status, LinkedPerson: person, DueAt: x.DueAt, CreatedAt: x.CreatedAt, CompletedAt: x.CompletedAt, SourceNoteID: note}
+}
+
+func (a *API) today(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(r)
+	if !ok {
+		writeError(w, r, 401, "unauthorized", "Authentication is required.")
+		return
+	}
+	v, err := a.service.GetToday(r.Context(), p.UserID, a.cfg.Now())
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	out := dto.Today{Date: v.Date, Timezone: v.Timezone, Notes: []dto.TodayNote{}, OpenActions: []dto.Action{}, DailySummary: dto.DailySummary{Date: v.Date, Status: v.DailySummary.Status, Counters: dto.DailyCounters{OpenLoops: v.DailySummary.OpenLoops, Decisions: v.DailySummary.Decisions, PeopleMentioned: v.DailySummary.PeopleMentioned}, ShortSummary: v.DailySummary.ShortSummary, GeneratedAt: v.DailySummary.GeneratedAt}}
+	for _, n := range v.Notes {
+		raw := runePreview(n.RawText, 400)
+		x := dto.TodayNote{ID: publicID("note", n.ID), RawText: raw, Summary: n.Summary, ProcessingStatus: n.ProcessingStatus, CreatedAt: n.CreatedAt, ExtractedCounts: dto.ExtractedCounts{Actions: n.Counts.Actions, People: n.Counts.People, Decisions: n.Counts.Decisions, Entities: n.Counts.Entities}, Preview: dto.NotePreview{People: []dto.LinkedPerson{}, Tickets: []string{}, Tags: []string{}}}
+		seen := map[int64]bool{}
+		for _, p := range n.People {
+			if !seen[p.PersonID] && len(x.Preview.People) < 3 {
+				x.Preview.People = append(x.Preview.People, dto.LinkedPerson{ID: publicID("person", p.PersonID), DisplayName: p.Name})
+				seen[p.PersonID] = true
+			}
+		}
+		for _, e := range n.Entities {
+			if e.Type == "ticket" && len(x.Preview.Tickets) < 3 {
+				x.Preview.Tickets = append(x.Preview.Tickets, e.Value)
+			} else if e.Type != "ticket" && len(x.Preview.Tags) < 3 {
+				x.Preview.Tags = append(x.Preview.Tags, e.Value)
+			}
+		}
+		out.Notes = append(out.Notes, x)
+	}
+	for _, x := range v.OpenActions {
+		out.OpenActions = append(out.OpenActions, mapAction(x))
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func runePreview(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+func (a *API) noteDetail(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(r)
+	if !ok {
+		writeError(w, r, 401, "unauthorized", "Authentication is required.")
+		return
+	}
+	id, ok := parsePublicID(r.PathValue("id"), "note")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.GetNoteDetail(r.Context(), p.UserID, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	out := dto.NoteDetail{ID: publicID("note", v.Note.ID), RawText: v.Note.RawText, Summary: v.Note.Summary, ProcessingStatus: v.Note.ProcessingStatus, CreatedAt: v.Note.CreatedAt, ProcessedAt: v.Note.ProcessedAt, Actions: []dto.Action{}, People: []dto.PersonDetail{}, Decisions: []dto.Decision{}, Entities: []dto.Entity{}}
+	for _, x := range v.Actions {
+		out.Actions = append(out.Actions, mapAction(x))
+	}
+	idx := map[int64]int{}
+	for _, x := range v.People {
+		i, exists := idx[x.PersonID]
+		if !exists {
+			i = len(out.People)
+			idx[x.PersonID] = i
+			out.People = append(out.People, dto.PersonDetail{ID: publicID("person", x.PersonID), DisplayName: x.Name, Highlights: []dto.Highlight{}})
+		}
+		out.People[i].Highlights = append(out.People[i].Highlights, dto.Highlight{Type: x.Type, Theme: x.Theme, Text: x.Text})
+	}
+	for _, x := range v.Decisions {
+		out.Decisions = append(out.Decisions, dto.Decision{ID: publicID("decision", x.ID), Text: x.Text, Status: x.Status, Topic: x.Topic})
+	}
+	seen := map[string]bool{}
+	for _, x := range v.Entities {
+		k := x.Type + "\x00" + x.Value
+		if !seen[k] {
+			out.Entities = append(out.Entities, dto.Entity{Type: x.Type, Value: x.Value})
+			seen[k] = true
+		}
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
 }
 func publicID(prefix string, id int64) string { return fmt.Sprintf("%s_%d", prefix, id) }
 func parsePublicID(raw, prefix string) (int64, bool) {
