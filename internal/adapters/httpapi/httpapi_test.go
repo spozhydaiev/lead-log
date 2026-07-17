@@ -11,9 +11,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/services"
 )
 
 type fakeService struct {
@@ -40,10 +42,39 @@ func (f *fakeService) SetActionStatus(_ context.Context, _ int64, id int64, stat
 	}
 	return store.APIAction{ID: id, Status: status, CreatedAt: time.Now()}, nil
 }
+func (f *fakeService) GetToday(context.Context, int64, time.Time) (services.TodayView, error) {
+	return services.TodayView{Date: "2026-07-17", Timezone: "Europe/Warsaw", Notes: []services.TodayNote{}, OpenActions: []store.APIAction{}, DailySummary: services.TodayDailySummary{Status: "not_available"}}, nil
+}
+func (f *fakeService) GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error) {
+	return services.NoteDetailView{}, pgx.ErrNoRows
+}
 
 type pinger struct {
 	err   error
 	calls int
+}
+
+func TestTodayAndNoteDetailRoutes(t *testing.T) {
+	h := testAPI(t, &pinger{}, io.Discard)
+	if w := request(h, "GET", "/api/v1/today", "", "top-secret-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"not_available"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := request(h, "GET", "/api/v1/today?user_id=99", "", ""); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/v1/notes/bad_1", "", "top-secret-token"); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/v1/notes/note_1", "", "top-secret-token"); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+}
+func TestRunePreviewUTF8(t *testing.T) {
+	s := strings.Repeat("🙂", 401)
+	got := runePreview(s, 400)
+	if len([]rune(got)) != 400 || !utf8.ValidString(got) {
+		t.Fatal("invalid preview")
+	}
 }
 
 func (p *pinger) Ping(context.Context) error { p.calls++; return p.err }

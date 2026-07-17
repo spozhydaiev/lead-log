@@ -37,6 +37,25 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '413': {description: Request too large, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
         '415': {description: Unsupported media type, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  /api/v1/notes/{id}:
+    get:
+      description: Returns the persisted note and its bounded structured enrichment; never starts enrichment.
+      parameters: [{name: id, in: path, required: true, schema: {type: string, pattern: '^note_[1-9][0-9]*$'}}]
+      responses:
+        '200': {description: Owner-scoped note detail, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/NoteDetail'}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/today:
+    get:
+      description: Read-only aggregate for the current day in the configured user timezone. It never generates a digest.
+      responses:
+        '200': {description: Bounded Today aggregate, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/Today'}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/actions:
     get:
       parameters:
@@ -67,6 +86,9 @@ components:
   responses:
     Unauthorized: {description: Authentication failed without disclosing why, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
     BadRequest: {description: Invalid input, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+    NotFound: {description: Resource is absent in the authenticated user's scope, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+    InternalError: {description: Safe internal error, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+    Unavailable: {description: Service unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
   schemas:
     Health: {type: object, required: [status], properties: {status: {const: ok}}}
     Ready: {type: object, required: [status], properties: {status: {enum: [ready, not_ready]}}}
@@ -78,5 +100,18 @@ components:
     Person: {type: object, required: [display_name], properties: {display_name: {type: string}}}
     Action: {type: object, required: [id, title, status, created_at], properties: {id: {type: string, example: action_31}, title: {type: string}, status: {enum: [open, done]}, linked_person: {oneOf: [{$ref: '#/components/schemas/Person'}, {type: 'null'}]}, due_at: {type: [string, 'null'], format: date-time}, created_at: {type: string, format: date-time}, completed_at: {type: [string, 'null'], format: date-time}, source_note_id: {type: [string, 'null']}}}
     ActionList: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Action'}}, pagination: {$ref: '#/components/schemas/Pagination'}}}
+    ProcessingStatus: {type: string, enum: [pending, processing, processed, failed]}
+    PersonPreview: {type: object, required: [id, display_name], properties: {id: {type: string, example: person_12}, display_name: {type: string}}}
+    ExtractedCounts: {type: object, required: [actions, people, decisions, entities], properties: {actions: {type: integer}, people: {type: integer}, decisions: {type: integer}, entities: {type: integer}}}
+    NotePreviewMetadata: {type: object, required: [people, tickets, tags], properties: {people: {type: array, maxItems: 3, items: {$ref: '#/components/schemas/PersonPreview'}}, tickets: {type: array, maxItems: 3, items: {type: string}}, tags: {type: array, maxItems: 3, items: {type: string}}}}
+    TodayNote: {type: object, required: [id, raw_text, summary, processing_status, created_at, extracted_counts, preview], properties: {id: {type: string, example: note_184}, raw_text: {type: string, maxLength: 400}, summary: {type: [string, 'null']}, processing_status: {$ref: '#/components/schemas/ProcessingStatus'}, created_at: {type: string, format: date-time}, extracted_counts: {$ref: '#/components/schemas/ExtractedCounts'}, preview: {$ref: '#/components/schemas/NotePreviewMetadata'}}}
+    DailyCounters: {type: object, required: [open_loops, decisions, people_mentioned], properties: {open_loops: {type: integer}, decisions: {type: integer}, people_mentioned: {type: integer}}}
+    DailySummary: {type: object, required: [date, status, counters, generated_at], properties: {date: {type: string, format: date}, status: {enum: [available, not_available]}, short_summary: {type: string}, counters: {$ref: '#/components/schemas/DailyCounters'}, generated_at: {type: [string, 'null'], format: date-time}}}
+    Today: {type: object, required: [date, timezone, notes, open_actions, daily_summary], properties: {date: {type: string, format: date, example: '2026-07-17'}, timezone: {type: string, example: Europe/Warsaw}, notes: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/TodayNote'}}, open_actions: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/Action'}}, daily_summary: {$ref: '#/components/schemas/DailySummary'}}}
+    PeopleHighlight: {type: object, required: [type, theme, text], properties: {type: {type: string, example: collaboration}, theme: {type: string}, text: {type: string}}}
+    PersonDetail: {allOf: [{$ref: '#/components/schemas/PersonPreview'}, {type: object, required: [highlights], properties: {highlights: {type: array, items: {$ref: '#/components/schemas/PeopleHighlight'}}}}]}
+    Decision: {type: object, required: [id, text, status], properties: {id: {type: string, example: decision_18}, text: {type: string}, status: {type: string, example: active}, topic: {type: string}}}
+    Entity: {type: object, required: [type, value], properties: {type: {enum: [ticket, project, service, component, repository, document, other]}, value: {type: string}}}
+    NoteDetail: {type: object, required: [id, raw_text, summary, processing_status, created_at, processed_at, actions, people, decisions, entities], properties: {id: {type: string}, raw_text: {type: string}, summary: {type: [string, 'null']}, processing_status: {$ref: '#/components/schemas/ProcessingStatus'}, created_at: {type: string, format: date-time}, processed_at: {type: [string, 'null'], format: date-time}, actions: {type: array, maxItems: 50, items: {$ref: '#/components/schemas/Action'}}, people: {type: array, items: {$ref: '#/components/schemas/PersonDetail'}}, decisions: {type: array, maxItems: 50, items: {$ref: '#/components/schemas/Decision'}}, entities: {type: array, maxItems: 50, items: {$ref: '#/components/schemas/Entity'}}}}
     APIError: {type: object, required: [code, message, request_id], properties: {code: {enum: [unauthorized, forbidden, validation_error, not_found, conflict, request_too_large, unsupported_media_type, internal_error, service_unavailable]}, message: {type: string}, request_id: {type: string}}}
     ErrorEnvelope: {type: object, required: [error], properties: {error: {$ref: '#/components/schemas/APIError'}}}

@@ -79,9 +79,28 @@ type APIAction struct {
 	NoteID        *int64
 	Title, Status string
 	PersonName    *string
+	PersonID      *int64
 	DueAt         *time.Time
 	CreatedAt     time.Time
 	CompletedAt   *time.Time
+}
+type TodayCounts struct{ Actions, People, Decisions, Entities int }
+type PersonHighlight struct {
+	PersonID                int64
+	Name, Type, Theme, Text string
+}
+type EntityView struct{ Type, Value string }
+type DecisionView struct {
+	ID                  int64
+	Text, Status, Topic string
+}
+type NoteDetailRecord struct {
+	APINote
+	ProcessedAt *time.Time
+}
+type DailyCache struct {
+	ResponseJSON string
+	CreatedAt    time.Time
 }
 type PageCursor struct {
 	CreatedAt time.Time
@@ -153,7 +172,7 @@ func cursorID(c *PageCursor) int64 {
 }
 
 func (s *Store) ListAPIActions(ctx context.Context, userID int64, status string, limit int, cursor *PageCursor) ([]APIAction, error) {
-	rows, err := s.pool.Query(ctx, `SELECT a.id,n.id,a.title,a.status,p.name,a.due_at,a.created_at,a.completed_at FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND ($2='all' OR a.status=$2) AND ($3::timestamptz IS NULL OR (a.created_at,a.id)<($3,$4)) ORDER BY a.created_at DESC,a.id DESC LIMIT $5`, userID, status, cursorTime(cursor), cursorID(cursor), limit)
+	rows, err := s.pool.Query(ctx, `SELECT a.id,n.id,a.title,a.status,p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a LEFT JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND ($2='all' OR a.status=$2) AND ($3::timestamptz IS NULL OR (a.created_at,a.id)<($3,$4)) ORDER BY a.created_at DESC,a.id DESC LIMIT $5`, userID, status, cursorTime(cursor), cursorID(cursor), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +180,7 @@ func (s *Store) ListAPIActions(ctx context.Context, userID int64, status string,
 	var out []APIAction
 	for rows.Next() {
 		var a APIAction
-		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -171,8 +190,130 @@ func (s *Store) ListAPIActions(ctx context.Context, userID int64, status string,
 
 func (s *Store) SetActionStatus(ctx context.Context, userID, actionID int64, status string) (APIAction, error) {
 	var a APIAction
-	err := s.pool.QueryRow(ctx, `UPDATE actions SET status=$3,completed_at=CASE WHEN $3='done' THEN COALESCE(completed_at,now()) ELSE NULL END WHERE user_id=$1 AND id=$2 RETURNING id,note_id,title,status,NULL::text,due_at,created_at,completed_at`, userID, actionID, status).Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.DueAt, &a.CreatedAt, &a.CompletedAt)
+	err := s.pool.QueryRow(ctx, `UPDATE actions SET status=$3,completed_at=CASE WHEN $3='done' THEN COALESCE(completed_at,now()) ELSE NULL END WHERE user_id=$1 AND id=$2 RETURNING id,note_id,title,status,NULL::text,NULL::bigint,due_at,created_at,completed_at`, userID, actionID, status).Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt)
 	return a, err
+}
+
+func (s *Store) ListTodayNotes(ctx context.Context, userID int64, from, to time.Time, limit int) ([]APINote, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at FROM notes WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 ORDER BY created_at DESC,id DESC LIMIT $4`, userID, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APINote
+	for rows.Next() {
+		var n APINote
+		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+func (s *Store) NoteCounts(ctx context.Context, userID int64, ids []int64) (map[int64]TodayCounts, error) {
+	out := map[int64]TodayCounts{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT n.id,(SELECT count(*) FROM actions a WHERE a.user_id=$1 AND a.note_id=n.id),(SELECT count(DISTINCT pn.person_id) FROM people_notes pn WHERE pn.user_id=$1 AND pn.note_id=n.id),(SELECT count(*) FROM decisions d WHERE d.user_id=$1 AND d.note_id=n.id),(SELECT count(*) FROM entity_mentions e WHERE e.user_id=$1 AND e.note_id=n.id) FROM notes n WHERE n.user_id=$1 AND n.id=ANY($2)`, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var c TodayCounts
+		if err := rows.Scan(&id, &c.Actions, &c.People, &c.Decisions, &c.Entities); err != nil {
+			return nil, err
+		}
+		out[id] = c
+	}
+	return out, rows.Err()
+}
+func (s *Store) HighlightsForNotes(ctx context.Context, userID int64, ids []int64, limit int) (map[int64][]PersonHighlight, error) {
+	out := map[int64][]PersonHighlight{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT note_id,person_id,name,type,COALESCE(theme,''),text FROM (SELECT pn.note_id,pn.person_id,p.name,pn.type,pn.theme,pn.text,row_number() OVER(PARTITION BY pn.note_id ORDER BY pn.created_at,pn.id) rn FROM people_notes pn JOIN people p ON p.id=pn.person_id AND p.user_id=pn.user_id WHERE pn.user_id=$1 AND pn.note_id=ANY($2)) x WHERE rn <= $3 ORDER BY note_id,rn`, userID, ids, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var x PersonHighlight
+		if err := rows.Scan(&id, &x.PersonID, &x.Name, &x.Type, &x.Theme, &x.Text); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) EntitiesForNotes(ctx context.Context, userID int64, ids []int64, limit int) (map[int64][]EntityView, error) {
+	out := map[int64][]EntityView{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT note_id,entity_type,normalized_value FROM (SELECT note_id,entity_type,normalized_value,row_number() OVER(PARTITION BY note_id ORDER BY id) rn FROM entity_mentions WHERE user_id=$1 AND note_id=ANY($2)) x WHERE rn <= $3 ORDER BY note_id,rn`, userID, ids, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var x EntityView
+		if err := rows.Scan(&id, &x.Type, &x.Value); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) NoteDetail(ctx context.Context, userID, noteID int64) (NoteDetailRecord, error) {
+	var n NoteDetailRecord
+	err := s.pool.QueryRow(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at,processed_at FROM notes WHERE user_id=$1 AND id=$2`, userID, noteID).Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt, &n.ProcessedAt)
+	return n, err
+}
+func (s *Store) ActionsForNote(ctx context.Context, userID, noteID int64, limit int) ([]APIAction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT a.id,a.note_id,a.title,a.status,p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a JOIN notes n ON n.id=a.note_id AND n.user_id=a.user_id LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.note_id=$2 ORDER BY a.created_at,a.id LIMIT $3`, userID, noteID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIAction
+	for rows.Next() {
+		var a APIAction
+		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+func (s *Store) DecisionsForNote(ctx context.Context, userID, noteID int64, limit int) ([]DecisionView, error) {
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.text,d.status,COALESCE(d.topic,'') FROM decisions d JOIN notes n ON n.id=d.note_id AND n.user_id=d.user_id WHERE d.user_id=$1 AND d.note_id=$2 ORDER BY d.id LIMIT $3`, userID, noteID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DecisionView
+	for rows.Next() {
+		var x DecisionView
+		if err := rows.Scan(&x.ID, &x.Text, &x.Status, &x.Topic); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) LatestDailyCache(ctx context.Context, userID int64, scope string) (*DailyCache, error) {
+	var x DailyCache
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(response_json::text,''),created_at FROM agent_responses WHERE user_id=$1 AND kind='daily' AND scope_key LIKE $2||':%' ORDER BY created_at DESC LIMIT 1`, userID, scope).Scan(&x.ResponseJSON, &x.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return &x, err
 }
 
 func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int64, error) {
