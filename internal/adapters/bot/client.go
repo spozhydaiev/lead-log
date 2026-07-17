@@ -32,6 +32,7 @@ type service interface {
 	Weekly(ctx context.Context, userID int64, refresh bool) (string, error)
 	Ask(ctx context.Context, userID int64, question string) (string, error)
 	Ticket(ctx context.Context, userID int64, arg string) (string, error)
+	Person(ctx context.Context, userID int64, arg string) (string, error)
 	ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error)
 	MarkTelegramUpdateProcessed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time) error
 	MarkTelegramUpdateFailed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time, cause error) error
@@ -172,6 +173,12 @@ func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int6
 		response, err = b.svc.Ask(ctx, userID, arg)
 	case "/ticket":
 		response, err = b.svc.Ticket(ctx, userID, arg)
+	case "/person":
+		if strings.TrimSpace(arg) == "" {
+			response = b.cfg.ResponseLanguage.CommonMessages().PersonUsage
+			break
+		}
+		response, err = b.svc.Person(ctx, userID, arg)
 	default:
 		if cmd != "" {
 			response = b.cfg.ResponseLanguage.CommonMessages().UnknownCommand
@@ -254,7 +261,7 @@ func chunks(s string, max int) []string {
 
 func safeCommandName(command string) string {
 	switch command {
-	case "plain_text", "/start", "/help", "/note", "/now", "/open", "/done", "/daily", "/weekly", "/ask", "/ticket":
+	case "plain_text", "/start", "/help", "/note", "/now", "/open", "/done", "/daily", "/weekly", "/ask", "/ticket", "/person":
 		return strings.TrimPrefix(command, "/")
 	default:
 		return "unknown"

@@ -73,19 +73,47 @@ type Action struct {
 }
 
 type PersonContext struct {
-	PersonID   int64
-	PersonName string
-	Notes      []PersonContextNote
-	Actions    []Action
+	CanonicalName    string
+	LastMentionAt    *time.Time
+	MentionCount     int
+	RecentNotes      []PersonContextItem
+	OpenActions      []PersonContextAction
+	CompletedActions []PersonContextAction
+	Commitments      []PersonContextItem
+	FollowUps        []PersonContextItem
+	Feedback         []PersonContextItem
+	Achievements     []PersonContextItem
+	Concerns         []PersonContextItem
+	Decisions        []PersonContextDecision
+	OpenQuestions    []PersonContextItem
+	PossibleMentions []PersonContextItem
+	Sources          []PersonContextSource
 }
 
-type PersonContextNote struct {
-	Type          string
-	Theme         string
-	Text          string
-	NoteID        int64
-	SourceNoteIDs []int64
-	CreatedAt     time.Time
+type PersonContextItem struct {
+	Text         string
+	Type         string
+	SourceNoteID int64
+	Date         time.Time
+}
+type PersonContextAction struct {
+	ID           int64
+	Title        string
+	Status       string
+	SourceNoteID int64
+	Date         time.Time
+	DueAt        *time.Time
+}
+type PersonContextDecision struct {
+	Text         string
+	Topic        string
+	Status       string
+	SourceNoteID int64
+	Date         time.Time
+}
+type PersonContextSource struct {
+	NoteID int64
+	Date   time.Time
 }
 
 type DecisionRecord struct {
