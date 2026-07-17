@@ -26,6 +26,7 @@ type RetrievalItem struct {
 	EntityType   string
 	EntityValue  string
 	Status       string
+	DueAt        *time.Time
 	Score        float64
 }
 

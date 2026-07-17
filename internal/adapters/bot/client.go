@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -33,6 +34,7 @@ type service interface {
 	Ask(ctx context.Context, userID int64, question string) (string, error)
 	Ticket(ctx context.Context, userID int64, arg string) (string, error)
 	Person(ctx context.Context, userID int64, arg string) (string, error)
+	Agenda(ctx context.Context, userID int64, arg string) (string, error)
 	ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error)
 	MarkTelegramUpdateProcessed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time) error
 	MarkTelegramUpdateFailed(ctx context.Context, meta store.TelegramUpdateMeta, startedAt time.Time, cause error) error
@@ -179,6 +181,12 @@ func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int6
 			break
 		}
 		response, err = b.svc.Person(ctx, userID, arg)
+	case "/agenda":
+		if strings.TrimSpace(arg) == "" {
+			response = b.cfg.ResponseLanguage.CommonMessages().AgendaUsage
+			break
+		}
+		response, err = b.svc.Agenda(ctx, userID, arg)
 	default:
 		if cmd != "" {
 			response = b.cfg.ResponseLanguage.CommonMessages().UnknownCommand
@@ -248,9 +256,13 @@ func (b *Bot) send(chatID int64, text string) error {
 func chunks(s string, max int) []string {
 	var out []string
 	for len(s) > max {
-		cut := strings.LastIndex(s[:max], "\n")
+		cutLimit := max
+		for cutLimit > 0 && !utf8.ValidString(s[:cutLimit]) {
+			cutLimit--
+		}
+		cut := strings.LastIndex(s[:cutLimit], "\n")
 		if cut < 500 {
-			cut = max
+			cut = cutLimit
 		}
 		out = append(out, s[:cut])
 		s = strings.TrimSpace(s[cut:])
@@ -261,7 +273,7 @@ func chunks(s string, max int) []string {
 
 func safeCommandName(command string) string {
 	switch command {
-	case "plain_text", "/start", "/help", "/note", "/now", "/open", "/done", "/daily", "/weekly", "/ask", "/ticket", "/person":
+	case "plain_text", "/start", "/help", "/note", "/now", "/open", "/done", "/daily", "/weekly", "/ask", "/ticket", "/person", "/agenda":
 		return strings.TrimPrefix(command, "/")
 	default:
 		return "unknown"

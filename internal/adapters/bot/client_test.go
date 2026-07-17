@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -43,6 +44,14 @@ func TestSplitCommand(t *testing.T) {
 	}
 }
 
+func TestChunksPreserveUTF8(t *testing.T) {
+	input := strings.Repeat("ї", 2000)
+	got := chunks(input, 3500)
+	if len(got) != 2 || !utf8.ValidString(got[0]) || !utf8.ValidString(got[1]) || strings.Join(got, "") != input {
+		t.Fatalf("invalid UTF-8 chunks: lengths=%d/%d", len(got[0]), len(got[1]))
+	}
+}
+
 func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 	help := models.LanguageEnglish.CommonMessages().HelpText
 	for _, want := range []string{
@@ -53,6 +62,7 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		"/ask <question> — ask about your saved work history with source notes",
 		"/ticket <ticket-key> — show deterministic ticket history from your notes",
 		"/person <name> — show source-backed context for a person",
+		"/agenda <person-name> — prepare a deterministic, source-backed 1:1 agenda",
 		"regular text without /note",
 	} {
 		if !strings.Contains(help, want) {
@@ -60,7 +70,7 @@ func TestHelpTextDocumentsMVPCommands(t *testing.T) {
 		}
 	}
 
-	for _, removed := range []string{"/agenda", "/review", "/alias", "/merge"} {
+	for _, removed := range []string{"/review", "/alias", "/merge"} {
 		if strings.Contains(help, removed) {
 			t.Fatalf("help text still exposes %q\n%s", removed, help)
 		}
@@ -156,6 +166,42 @@ func TestHandleMessagePersonDuplicateSkipsRetrievalAndReply(t *testing.T) {
 	}
 	if len(replies) != 1 || replies[0] != "person answer" {
 		t.Fatalf("replies=%#v", replies)
+	}
+}
+
+func TestHandleMessageAgendaRoutesWithoutCapture(t *testing.T) {
+	fake := &fakeBotService{agendaResponse: "agenda answer"}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	var replies []string
+	b.handleMessageWithReply(testContext(), testMessage(100, "/agenda@LeadLogBot Адлет"), func(_ int64, text string) { replies = append(replies, text) })
+	if fake.agendaCalls != 1 || fake.lastAgendaArg != "Адлет" {
+		t.Fatalf("Agenda calls/arg=%d/%q", fake.agendaCalls, fake.lastAgendaArg)
+	}
+	if fake.captureCalls != 0 || fake.addCalls != 0 || fake.askCalls != 0 {
+		t.Fatal("agenda caused a write or LLM-backed call")
+	}
+	if len(replies) != 1 || replies[0] != "agenda answer" {
+		t.Fatalf("replies=%#v", replies)
+	}
+}
+
+func TestHandleMessageAgendaUsageAndDuplicate(t *testing.T) {
+	for _, input := range []string{"/agenda", "/agenda    "} {
+		fake := &fakeBotService{}
+		b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+		var replies []string
+		b.handleMessageWithReply(testContext(), testMessage(100, input), func(_ int64, text string) { replies = append(replies, text) })
+		if fake.agendaCalls != 0 || len(replies) != 1 || replies[0] != models.LanguageEnglish.CommonMessages().AgendaUsage {
+			t.Fatalf("input=%q calls=%d replies=%#v", input, fake.agendaCalls, replies)
+		}
+	}
+	fake := &fakeBotService{agendaResponse: "agenda", claims: []store.TelegramUpdateClaim{{Claimed: true, Status: store.TelegramUpdateStatusProcessing, ProcessingStartedAt: time.Now()}, {Claimed: false, Status: store.TelegramUpdateStatusProcessed}}}
+	b := testBot(fake, map[int64]bool{100: true}, models.LanguageEnglish)
+	msg := testMessage(100, "/agenda Adlet")
+	b.handleMessageWithUpdateAndReply(testContext(), 777, msg, func(int64, string) {})
+	b.handleMessageWithUpdateAndReply(testContext(), 777, msg, func(int64, string) {})
+	if fake.agendaCalls != 1 {
+		t.Fatalf("agenda calls=%d", fake.agendaCalls)
 	}
 }
 
@@ -358,6 +404,9 @@ type fakeBotService struct {
 	personCalls     int
 	lastPersonArg   string
 	personResponse  string
+	agendaCalls     int
+	lastAgendaArg   string
+	agendaResponse  string
 }
 
 func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
@@ -421,6 +470,14 @@ func (f *fakeBotService) Person(ctx context.Context, userID int64, arg string) (
 		return f.personResponse, nil
 	}
 	return "person", nil
+}
+func (f *fakeBotService) Agenda(ctx context.Context, userID int64, arg string) (string, error) {
+	f.agendaCalls++
+	f.lastAgendaArg = arg
+	if f.agendaResponse != "" {
+		return f.agendaResponse, nil
+	}
+	return "agenda", nil
 }
 func (f *fakeBotService) ClaimTelegramUpdate(ctx context.Context, meta store.TelegramUpdateMeta, staleAfter time.Duration) (store.TelegramUpdateClaim, error) {
 	if len(f.claims) > 0 {

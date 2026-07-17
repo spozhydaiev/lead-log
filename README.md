@@ -161,8 +161,11 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 - `/ask <question>` — ask about saved work history with source-backed answers.
 - `/ticket <ticket-key>` — show deterministic ticket history from exact ticket mentions and bounded raw-note fallback; no Jira/API/LLM lookup is used.
 - `/person <name>` — show deterministic, source-backed context for a canonical person using existing aliases; no LLM lookup or performance judgment is used.
+- `/agenda <person-name>` — prepare a bounded, deterministic 1:1 agenda from the same person context (open actions of any age; commitments/follow-ups from 60 days; concerns, questions, decisions, and positive notes from 30 days; completed actions and raw context from 14 days). Structured records take precedence and no LLM is used.
 
-Out of MVP scope for now: person context, 1:1 agenda generation, performance review packs, Jira integration, calendar integration, monitoring integrations, voice transcription, web UI, multi-user workspaces, and billing. Existing database tables and migrations for older data are left in place for backward compatibility.
+`/agenda` resolves canonical names and aliases through the same read-only, user-scoped resolution and `PersonContext` retrieval as `/person`. It orders high-priority overdue actions and concerns first, then normal-priority open actions, commitments, follow-ups, questions, and active decisions; positive and general context are low priority. Done actions are recognition candidates for 14 days, and superseded/reversed decisions are excluded. Deduplication prefers the first structured representation (actions before people notes, decisions before raw context) using source note plus normalized text. Exact canonical/alias raw-note matches are a 14-day context-only fallback: they are never promoted to concerns or commitments.
+
+Out of MVP scope for now: performance review packs, Jira integration, calendar integration, monitoring integrations, voice transcription, web UI, multi-user workspaces, and billing. Existing database tables and migrations for older data are left in place for backward compatibility.
 
 
 ### Telegram update idempotency
