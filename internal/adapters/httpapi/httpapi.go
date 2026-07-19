@@ -283,6 +283,11 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		var ve services.ValidationError
+		if errors.As(err, &ve) {
+			validationFields(w, r, ve.Fields)
+			return
+		}
 		validation(w, r)
 		return
 	}
@@ -669,11 +674,21 @@ func decode(w http.ResponseWriter, r *http.Request, d any) string {
 func validation(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, 400, "validation_error", "The request is invalid.")
 }
+func validationFields(w http.ResponseWriter, r *http.Request, fields map[string]string) {
+	writeErrorWithFields(w, r, 400, "validation_error", "The request is invalid.", fields)
+}
 func internal(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, 500, "internal_error", "An internal error occurred.")
 }
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
-	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg, "request_id": requestID(r)}})
+	writeErrorWithFields(w, r, status, code, msg, nil)
+}
+func writeErrorWithFields(w http.ResponseWriter, r *http.Request, status int, code, msg string, fields map[string]string) {
+	err := map[string]any{"code": code, "message": msg, "request_id": requestID(r)}
+	if len(fields) > 0 {
+		err["fields"] = fields
+	}
+	writeJSON(w, status, map[string]any{"error": err})
 }
 func requestID(r *http.Request) string { s, _ := r.Context().Value(requestIDKey).(string); return s }
 func writeJSON(w http.ResponseWriter, status int, v any) {

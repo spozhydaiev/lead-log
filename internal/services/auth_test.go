@@ -34,3 +34,21 @@ func TestPasswordHashAndTokenHash(t *testing.T) {
 		t.Fatalf("bad token/hash")
 	}
 }
+
+func TestRegisterProfileValidationHelpers(t *testing.T) {
+	if got := ValidateResponseLanguage(""); got != "en" {
+		t.Fatalf("default language=%q", got)
+	}
+	if got := ValidateResponseLanguage("en"); got != "en" {
+		t.Fatalf("language en rejected: %q", got)
+	}
+	if got := ValidateResponseLanguage("uk"); got != "uk" {
+		t.Fatalf("language uk rejected: %q", got)
+	}
+	if got := ValidateResponseLanguage("de"); got != "" {
+		t.Fatalf("invalid language accepted: %q", got)
+	}
+	if MaxDisplayNameLength != 100 {
+		t.Fatalf("unexpected display name max: %d", MaxDisplayNameLength)
+	}
+}
