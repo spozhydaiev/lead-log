@@ -22,10 +22,32 @@ const MaxAskQuestionRunes = 1500
 const MaxAskCandidates = 30
 const MaxAskTotalTextRunes = 6000
 const MaxAskSnippetRunes = 500
+const MaxAskAPISources = 12
+const MaxAskAnswerRunes = 3000
 
 var ErrInvalidAskQuestion = errors.New("invalid ask question")
 var ErrAskPlanning = errors.New("ask planning failed")
 var ErrAskAnswer = errors.New("ask answer failed")
+
+type AskResponse struct {
+	Answer     string      `json:"answer"`
+	Sources    []AskSource `json:"sources"`
+	Scope      *AskScope   `json:"scope,omitempty"`
+	Confidence string      `json:"confidence"`
+}
+
+type AskSource struct {
+	Type       string     `json:"type"`
+	ID         string     `json:"id"`
+	OccurredAt *time.Time `json:"occurred_at,omitempty"`
+	Label      string     `json:"label"`
+	Excerpt    string     `json:"excerpt"`
+}
+
+type AskScope struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
 
 func (s *Service) Ask(ctx context.Context, userID int64, question string) (string, error) {
 	started := time.Now()
@@ -38,15 +60,8 @@ func (s *Service) Ask(ctx context.Context, userID int64, question string) (strin
 	}
 	log := s.logger.With("operation", "ask", "operation_id", logging.OperationID(ctx), "query_length", len(q), "planning_prompt_version", AskPlanningPromptVersion, "answer_prompt_version", AskAnswerPromptVersion, "model", s.llm.Model())
 	log.Info("ask started")
-	det := deterministicAskIntent(q)
 	planStart := time.Now()
-	intent, err := s.llm.PlanAskQuery(ctx, q, time.Now().In(s.dailyLocation).Format("2006-01-02"), s.dailyLocation.String(), string(s.language))
-	if err != nil {
-		log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "planning", "duration_ms", time.Since(planStart).Milliseconds()}, err)...)
-		return "", fmt.Errorf("%w: %v", ErrAskPlanning, err)
-	}
-	intent = mergeDeterministicIntent(intent, det)
-	intent, err = normalizeAskIntent(intent, q, time.Now(), s.dailyLocation)
+	intent, err := s.planAskIntent(ctx, q, time.Now(), s.dailyLocation)
 	if err != nil {
 		log.Error("ask failed", logging.WithSafeError([]any{"failure_stage", "intent_validation"}, err)...)
 		return "", fmt.Errorf("%w: %v", ErrAskPlanning, err)
@@ -78,6 +93,65 @@ func (s *Service) Ask(ctx context.Context, userID int64, question string) (strin
 	ans = validateAskAnswer(ans, candidates)
 	log.Info("ask completed", "answer_generation_duration_ms", time.Since(answerStart).Milliseconds(), "cited_source_count", citedCount(ans), "insufficient_data", ans.InsufficientData, "total_duration_ms", time.Since(started).Milliseconds())
 	return formatAskAnswer(ans, candidates, s.language), nil
+}
+
+func (s *Service) AskAPI(ctx context.Context, userID int64, question string, now time.Time, timezone string) (AskResponse, error) {
+	started := time.Now()
+	q := strings.TrimSpace(question)
+	if utf8.RuneCountInString(q) < 2 || utf8.RuneCountInString(q) > MaxAskQuestionRunes {
+		return AskResponse{}, ErrInvalidAskQuestion
+	}
+	loc := s.dailyLocation
+	if strings.TrimSpace(timezone) != "" {
+		if l, err := time.LoadLocation(timezone); err == nil {
+			loc = l
+		}
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	log := s.logger.With("operation", "ask.api", "operation_id", logging.OperationID(ctx), "query_length", utf8.RuneCountInString(q), "planning_prompt_version", AskPlanningPromptVersion, "answer_prompt_version", AskAnswerPromptVersion, "model", s.llm.Model())
+	log.Info("ask api started")
+	intent, err := s.planAskIntent(ctx, q, now, loc)
+	if err != nil {
+		return AskResponse{}, err
+	}
+	queries := BuildRetrievalPlan(userID, intent)
+	var all []models.RetrievalItem
+	for _, rq := range queries {
+		items, err := s.Retrieve(ctx, rq)
+		if err != nil {
+			return AskResponse{}, err
+		}
+		all = append(all, items...)
+	}
+	candidates := selectAskCandidates(all)
+	if len(candidates) == 0 {
+		return AskResponse{Answer: s.language.CommonMessages().AskNoResults, Scope: askScope(intent.DateRange, loc), Confidence: "insufficient_context"}, nil
+	}
+	if deterministicAskCanAnswer(q, intent) {
+		return deterministicAskResponse(q, intent, candidates, s.language, loc), nil
+	}
+	ans, err := s.llm.GenerateAskAnswer(ctx, q, intent, candidates, string(s.language))
+	if err != nil {
+		log.Error("ask api failed", logging.WithSafeError([]any{"failure_stage", "answer_generation", "duration_ms", time.Since(started).Milliseconds()}, err)...)
+		return AskResponse{}, fmt.Errorf("%w: %v", ErrAskAnswer, err)
+	}
+	ans = validateAskAnswer(ans, candidates)
+	return askResponseFromAnswer(ans, candidates, intent.DateRange, s.language, loc), nil
+}
+
+func (s *Service) planAskIntent(ctx context.Context, q string, now time.Time, loc *time.Location) (models.AskIntent, error) {
+	det := deterministicAskIntent(q)
+	intent := det
+	if det.IntentType == "" || (det.DateRange.Type == "" && len(det.Entities) == 0) {
+		planned, err := s.llm.PlanAskQuery(ctx, q, now.In(loc).Format("2006-01-02"), loc.String(), string(s.language))
+		if err != nil {
+			return models.AskIntent{}, fmt.Errorf("%w: %v", ErrAskPlanning, err)
+		}
+		intent = mergeDeterministicIntent(planned, det)
+	}
+	return normalizeAskIntent(intent, q, now, loc)
 }
 
 func deterministicAskIntent(q string) models.AskIntent {
@@ -374,7 +448,7 @@ func selectAskCandidates(items []models.RetrievalItem) []models.AskCandidate {
 			continue
 		}
 		total += utf8.RuneCountInString(text)
-		out = append(out, models.AskCandidate{Kind: it.Kind, SourceNoteID: it.SourceNoteID, Date: it.CreatedAt.Format("2006-01-02"), Title: truncateRunes(it.Title, 160), Text: text, PersonName: it.PersonName, EntityType: it.EntityType, EntityValue: it.EntityValue, Status: it.Status})
+		out = append(out, models.AskCandidate{Kind: it.Kind, RecordID: it.RecordID, SourceNoteID: it.SourceNoteID, Date: it.CreatedAt.Format("2006-01-02"), CreatedAt: it.CreatedAt, Title: truncateRunes(it.Title, 160), Text: text, PersonName: it.PersonName, EntityType: it.EntityType, EntityValue: it.EntityValue, Status: it.Status})
 		if len(out) >= MaxAskCandidates {
 			break
 		}
@@ -526,3 +600,109 @@ func firstNonBlank(v ...string) string {
 	return ""
 }
 func hashPrefix(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:])[:12] }
+
+func deterministicAskCanAnswer(q string, intent models.AskIntent) bool {
+	lower := strings.ToLower(q)
+	return intent.IntentType == models.AskIntentLatestMention || intent.IntentType == models.AskIntentOpenActions || (intent.IntentType == models.AskIntentActivity && (strings.Contains(lower, "yesterday") || strings.Contains(lower, "today") || strings.Contains(lower, "this week")))
+}
+
+func deterministicAskResponse(q string, intent models.AskIntent, c []models.AskCandidate, lang models.ResponseLanguage, loc *time.Location) AskResponse {
+	if len(c) == 0 {
+		return AskResponse{Answer: lang.CommonMessages().AskNoResults, Scope: askScope(intent.DateRange, loc), Confidence: "insufficient_context"}
+	}
+	var b strings.Builder
+	switch intent.IntentType {
+	case models.AskIntentLatestMention:
+		x := c[0]
+		label := strings.TrimSpace(firstNonBlank(x.EntityValue, x.Title, "the item"))
+		b.WriteString(fmt.Sprintf("The last matching mention I found was %s on %s.", label, x.CreatedAt.In(loc).Format("2006-01-02")))
+	case models.AskIntentOpenActions:
+		b.WriteString("Open actions I found:")
+		for i, x := range c {
+			if i >= 10 {
+				break
+			}
+			b.WriteString("\n- " + firstNonBlank(x.Title, x.Text))
+		}
+	default:
+		b.WriteString("I found these records for the requested period:")
+		for i, x := range c {
+			if i >= 10 {
+				break
+			}
+			b.WriteString("\n- " + firstNonBlank(x.Title, x.Text))
+		}
+	}
+	return AskResponse{Answer: truncateRunes(b.String(), MaxAskAnswerRunes), Sources: askSources(c, nil), Scope: askScope(intent.DateRange, loc), Confidence: "grounded"}
+}
+
+func askResponseFromAnswer(a models.AskAnswer, c []models.AskCandidate, dr models.AskDateRange, lang models.ResponseLanguage, loc *time.Location) AskResponse {
+	answer := truncateRunes(strings.TrimSpace(a.Answer), MaxAskAnswerRunes)
+	if answer == "" || a.InsufficientData {
+		if answer == "" {
+			answer = lang.CommonMessages().AskNoResults
+		}
+	}
+	ids := map[int64]bool{}
+	for _, it := range a.Items {
+		for _, id := range it.SourceNoteIDs {
+			ids[id] = true
+		}
+	}
+	conf := "grounded"
+	if a.InsufficientData {
+		conf = "insufficient_context"
+	}
+	return AskResponse{Answer: answer, Sources: askSources(c, ids), Scope: askScope(dr, loc), Confidence: conf}
+}
+
+func askSources(c []models.AskCandidate, noteIDs map[int64]bool) []AskSource {
+	out := []AskSource{}
+	seen := map[string]bool{}
+	for _, x := range c {
+		if noteIDs != nil && !noteIDs[x.SourceNoteID] {
+			continue
+		}
+		typ := askPublicType(x.Kind)
+		idn := x.RecordID
+		if typ == "note" || idn <= 0 {
+			idn = x.SourceNoteID
+		}
+		id := fmt.Sprintf("%s_%d", typ, idn)
+		if typ == "ticket" {
+			id = x.EntityValue
+		}
+		key := typ + ":" + id
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		t := x.CreatedAt
+		out = append(out, AskSource{Type: typ, ID: id, OccurredAt: &t, Label: truncateRunes(firstNonBlank(x.Title, x.EntityValue, string(x.Kind)), 120), Excerpt: truncateRunes(firstNonBlank(x.Text, x.Title), 300)})
+		if len(out) >= MaxAskAPISources {
+			break
+		}
+	}
+	return out
+}
+
+func askPublicType(k models.RetrievalKind) string {
+	switch k {
+	case models.RetrievalKindAction:
+		return "action"
+	case models.RetrievalKindPeopleNote:
+		return "person"
+	case models.RetrievalKindDecision:
+		return "decision"
+	case models.RetrievalKindEntityMention:
+		return "ticket"
+	default:
+		return "note"
+	}
+}
+func askScope(dr models.AskDateRange, loc *time.Location) *AskScope {
+	if dr.From == nil || dr.To == nil {
+		return nil
+	}
+	return &AskScope{From: dr.From.In(loc).Format("2006-01-02"), To: dr.To.In(loc).Add(-time.Nanosecond).Format("2006-01-02")}
+}
