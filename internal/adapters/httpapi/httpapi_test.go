@@ -30,6 +30,8 @@ type fakeService struct {
 	tickets        services.TicketsListView
 	ticket         services.TicketWorkspaceView
 	ticketErr      error
+	askResp        services.AskResponse
+	askErr         error
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -119,6 +121,16 @@ func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (
 func (f *fakeService) ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error) {
 	return f.tickets, nil
 }
+func (f *fakeService) AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error) {
+	if f.askErr != nil {
+		return services.AskResponse{}, f.askErr
+	}
+	if f.askResp.Answer != "" {
+		return f.askResp, nil
+	}
+	return services.AskResponse{Answer: "ok", Confidence: "grounded"}, nil
+}
+
 func (f *fakeService) GetTicketWorkspace(_ context.Context, _ int64, key string) (services.TicketWorkspaceView, error) {
 	if key == "MISS-404" {
 		return services.TicketWorkspaceView{}, pgx.ErrNoRows
@@ -474,5 +486,26 @@ func TestTicketReturnedByListCanBeOpenedByDetail(t *testing.T) {
 	detail := request(h, "GET", "/api/v1/tickets/CH-1234", "", "top-secret-token")
 	if detail.Code != 200 || !strings.Contains(detail.Body.String(), `"key":"CH-1234"`) || !strings.Contains(detail.Body.String(), `"open_actions":[]`) {
 		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}
+
+func TestAskEndpointValidationAndSuccess(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, askResp: services.AskResponse{Answer: "Grounded answer", Confidence: "grounded", Sources: []services.AskSource{{Type: "note", ID: "note_184", Label: "Discussion", Excerpt: "Short excerpt"}}}}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session", Now: func() time.Time { return now }, AllowedOrigins: []string{"http://localhost:3000"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w := request(h, "POST", "/api/v1/ask", `{"question":"What did I do yesterday?"}`, "top-secret-token")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"answer":"Grounded answer"`) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("ask success code=%d headers=%v body=%s", w.Code, w.Header(), w.Body.String())
+	}
+	for _, body := range []string{`{"question":""}`, `{"question":"   "}`, `{"question":"x"}`} {
+		w = request(h, "POST", "/api/v1/ask", body, "top-secret-token")
+		if w.Code != 400 {
+			t.Fatalf("body %s: got %d", body, w.Code)
+		}
+	}
+	w = request(h, "POST", "/api/v1/ask", `{"question":"ok"}`, "")
+	if w.Code != 401 {
+		t.Fatalf("unauthenticated got %d", w.Code)
 	}
 }

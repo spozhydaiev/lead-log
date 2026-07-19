@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/httpapi/dto"
@@ -59,6 +60,7 @@ type Service interface {
 	GetPersonWorkspace(context.Context, int64, int64) (services.PersonWorkspaceView, error)
 	ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error)
 	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
+	AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error)
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
@@ -114,6 +116,7 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/people", a.auth(http.HandlerFunc(a.people)))
 	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
+	mux.Handle("POST /api/v1/ask", a.auth(http.HandlerFunc(a.ask)))
 	mux.Handle("PATCH /api/v1/actions/{id}", a.auth(http.HandlerFunc(a.patchAction)))
 	return a.middleware(mux)
 }
@@ -467,6 +470,49 @@ func mapPreviewNote(n services.TodayNote) dto.TodayNote {
 	}
 	return x
 }
+
+func (a *API) ask(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeError(w, r, 415, "unsupported_media_type", "Content-Type must be application/json.")
+		return
+	}
+	var in struct {
+		Question         string  `json:"question"`
+		Timezone         *string `json:"timezone,omitempty"`
+		ResponseLanguage *string `json:"response_language,omitempty"`
+	}
+	if decode(w, r, &in) != "" {
+		return
+	}
+	q := strings.TrimSpace(in.Question)
+	l := utf8.RuneCountInString(q)
+	if l < 2 || l > services.MaxAskQuestionRunes {
+		validation(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
+	defer cancel()
+	out, err := a.service.AskAPI(ctx, p.UserID, q, a.cfg.Now(), p.Timezone)
+	if errors.Is(err, services.ErrInvalidAskQuestion) {
+		validation(w, r)
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, r, 504, "timeout", "The request timed out.")
+		return
+	}
+	if errors.Is(err, services.ErrAskAnswer) || errors.Is(err, services.ErrAskPlanning) {
+		writeError(w, r, 503, "llm_unavailable", "Ask is temporarily unavailable.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
 func (a *API) actions(w http.ResponseWriter, r *http.Request) {
 	p, _ := principal(r)
 	status := r.URL.Query().Get("status")

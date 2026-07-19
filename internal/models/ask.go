@@ -53,8 +53,10 @@ type AskIntent struct {
 
 type AskCandidate struct {
 	Kind         RetrievalKind `json:"kind"`
+	RecordID     int64         `json:"record_id,omitempty"`
 	SourceNoteID int64         `json:"source_note_id"`
 	Date         string        `json:"date"`
+	CreatedAt    time.Time     `json:"-"`
 	Title        string        `json:"title"`
 	Text         string        `json:"text"`
 	PersonName   string        `json:"person_name,omitempty"`
