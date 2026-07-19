@@ -2,9 +2,9 @@ openapi: 3.1.0
 info:
   title: Lead Log private web API
   version: 1.0.0
-  description: Private single-user MVP API. Authenticated responses use Cache-Control no-store.
+  description: Multi-user API using HttpOnly opaque session cookies. Browser clients must use credentials: include; unsafe methods require an allowed Origin. Telegram identifiers are never exposed.
 servers: [{url: /}]
-security: [{bearerAuth: []}]
+security: [{cookieAuth: []}]
 paths:
   /healthz:
     get:
@@ -16,6 +16,47 @@ paths:
       responses:
         '200': {description: Database is ready, content: {application/json: {schema: {$ref: '#/components/schemas/Ready'}}}}
         '503': {description: Database is unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/Ready'}}}}
+  /api/v1/auth/register:
+    post:
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RegisterRequest'}}}}
+      responses:
+        '201': {description: Registered and session cookie set, content: {application/json: {schema: {$ref: '#/components/schemas/CurrentUserEnvelope'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {description: Duplicate account, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  /api/v1/auth/login:
+    post:
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses:
+        '200': {description: Logged in and session cookie set, content: {application/json: {schema: {$ref: '#/components/schemas/CurrentUserEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/logout:
+    post:
+      responses:
+        '204': {description: Current session revoked and cookie cleared}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/session:
+    get:
+      responses:
+        '200': {description: Current session, content: {application/json: {schema: {$ref: '#/components/schemas/CurrentUserEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/integrations/telegram/link:
+    post:
+      description: Creates a short-lived one-time Telegram bot deep link. The token is random, stored hashed, and not logged.
+      responses:
+        '200': {description: Deep link, content: {application/json: {schema: {$ref: '#/components/schemas/TelegramLinkEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/integrations/telegram/status:
+    get:
+      responses:
+        '200': {description: Telegram connection status without Telegram identifiers, content: {application/json: {schema: {type: object, properties: {data: {$ref: '#/components/schemas/TelegramStatus'}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/integrations/telegram:
+    delete:
+      responses:
+        '204': {description: Telegram account unlinked; historical user data remains}
+        '401': {$ref: '#/components/responses/Unauthorized'}
   /api/v1/me:
     get:
       responses:
@@ -77,7 +118,7 @@ paths:
         '404': {description: Action absent in the authenticated user's scope, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
 components:
   securitySchemes:
-    bearerAuth: {type: http, scheme: bearer}
+    cookieAuth: {type: apiKey, in: cookie, name: lead_log_session, description: HttpOnly opaque server-side session cookie. Unsafe methods also require an Origin matching FRONTEND_ORIGINS.}
   headers:
     NoStore: {schema: {type: string, const: no-store}}
   parameters:
@@ -92,7 +133,12 @@ components:
   schemas:
     Health: {type: object, required: [status], properties: {status: {const: ok}}}
     Ready: {type: object, required: [status], properties: {status: {enum: [ready, not_ready]}}}
-    Me: {type: object, required: [response_language, timezone], properties: {display_name: {type: string}, response_language: {type: string}, timezone: {type: string}}}
+    Me: {type: object, required: [response_language, timezone, email], properties: {display_name: {type: string}, email: {type: string, format: email}, response_language: {type: string}, timezone: {type: string}}}
+    RegisterRequest: {type: object, additionalProperties: false, required: [email, password], properties: {email: {type: string, format: email}, password: {type: string, minLength: 12, maxLength: 128}, display_name: {type: string}, timezone: {type: string}, response_language: {type: string}}}
+    LoginRequest: {type: object, additionalProperties: false, required: [email, password], properties: {email: {type: string, format: email}, password: {type: string}}}
+    TelegramStatus: {type: object, required: [connected, linked_at], properties: {connected: {type: boolean}, linked_at: {type: [string, 'null'], format: date-time}}}
+    CurrentUserEnvelope: {type: object, required: [data], properties: {data: {type: object, required: [user, telegram], properties: {user: {$ref: '#/components/schemas/Me'}, telegram: {$ref: '#/components/schemas/TelegramStatus'}}}}}
+    TelegramLinkEnvelope: {type: object, required: [data], properties: {data: {type: object, required: [url, expires_at], properties: {url: {type: string, format: uri}, expires_at: {type: string, format: date-time}}}}}
     Pagination: {type: object, required: [limit, next_cursor], properties: {limit: {type: integer}, next_cursor: {type: [string, 'null']}}}
     Note: {type: object, required: [id, raw_text, tags, processing_status, created_at], properties: {id: {type: string, example: note_123}, raw_text: {type: string}, summary: {type: [string, 'null']}, tags: {type: array, items: {type: string}}, processing_status: {enum: [pending, processing, processed, failed]}, created_at: {type: string, format: date-time}}}
     NoteCreated: {type: object, required: [id, processing_status, created_at], properties: {id: {type: string}, processing_status: {const: pending}, created_at: {type: string, format: date-time}}}

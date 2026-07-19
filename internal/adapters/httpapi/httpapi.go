@@ -2,8 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +26,10 @@ import (
 const maxBody = 64 << 10
 const maxNoteLength = 10000
 
-type Principal struct{ UserID int64 }
+type Principal struct {
+	UserID       int64
+	SessionToken string
+}
 type contextKey int
 
 const (
@@ -33,7 +38,14 @@ const (
 )
 
 type Service interface {
-	WebUser(context.Context, int64) (store.WebUser, error)
+	Register(context.Context, services.RegisterInput, services.AuthConfig) (services.AuthSession, error)
+	Login(context.Context, services.LoginInput, services.AuthConfig) (services.AuthSession, error)
+	SessionByToken(context.Context, string, time.Time) (store.CurrentUser, error)
+	RevokeSession(context.Context, string) error
+	CurrentUser(context.Context, int64) (store.CurrentUser, error)
+	TelegramStatus(context.Context, int64) (store.TelegramStatus, error)
+	CreateTelegramLink(context.Context, int64, time.Duration) (string, time.Time, error)
+	UnlinkTelegram(context.Context, int64) error
 	CreatePendingNote(context.Context, int64, string) (store.APINote, error)
 	ListNotes(context.Context, int64, int, *store.PageCursor) ([]store.APINote, error)
 	ListActions(context.Context, int64, string, int, *store.PageCursor) ([]store.APIAction, error)
@@ -43,12 +55,17 @@ type Service interface {
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
-	Token                      string
-	TelegramUserID             int64
-	AllowedOrigins             []string
-	ResponseLanguage, Timezone string
-	ReadinessTimeout           time.Duration
-	Now                        func() time.Time
+	AllowedOrigins       []string
+	ResponseLanguage     string
+	Timezone             string
+	ReadinessTimeout     time.Duration
+	Now                  func() time.Time
+	SessionCookieName    string
+	SessionTTL           time.Duration
+	SessionSecure        bool
+	PasswordMinLength    int
+	TelegramBotUsername  string
+	TelegramLinkTokenTTL time.Duration
 }
 type API struct {
 	service Service
@@ -56,6 +73,7 @@ type API struct {
 	cfg     Config
 	logger  *slog.Logger
 	origins map[string]bool
+	limiter *rateLimiter
 }
 
 func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handler {
@@ -65,13 +83,20 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &API{service: service, db: db, cfg: cfg, logger: logger, origins: map[string]bool{}}
+	a := &API{service: service, db: db, cfg: cfg, logger: logger, origins: map[string]bool{}, limiter: newRateLimiter()}
 	for _, o := range cfg.AllowedOrigins {
 		a.origins[o] = true
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /readyz", a.ready)
+	mux.HandleFunc("POST /api/v1/auth/register", a.register)
+	mux.HandleFunc("POST /api/v1/auth/login", a.login)
+	mux.Handle("POST /api/v1/auth/logout", a.auth(http.HandlerFunc(a.logout)))
+	mux.Handle("GET /api/v1/auth/session", a.auth(http.HandlerFunc(a.session)))
+	mux.Handle("POST /api/v1/integrations/telegram/link", a.auth(http.HandlerFunc(a.telegramLink)))
+	mux.Handle("GET /api/v1/integrations/telegram/status", a.auth(http.HandlerFunc(a.telegramStatus)))
+	mux.Handle("DELETE /api/v1/integrations/telegram", a.auth(http.HandlerFunc(a.telegramUnlink)))
 	mux.Handle("GET /api/v1/me", a.auth(http.HandlerFunc(a.me)))
 	mux.Handle("GET /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
 	mux.Handle("GET /api/v1/notes/{id}", a.auth(http.HandlerFunc(a.noteDetail)))
@@ -97,8 +122,16 @@ func (a *API) middleware(next http.Handler) http.Handler {
 		if origin := r.Header.Get("Origin"); origin != "" && a.origins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		if isUnsafe(r.Method) && r.Method != http.MethodOptions {
+			origin := r.Header.Get("Origin")
+			if origin == "" || !a.origins[origin] {
+				writeError(w, r, http.StatusForbidden, "forbidden", "The request is not allowed.")
+				return
+			}
 		}
 		if r.Method == http.MethodOptions {
 			if !a.origins[r.Header.Get("Origin")] {
@@ -148,25 +181,195 @@ func newID() string {
 
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header.Get("Authorization")
-		parts := strings.SplitN(h, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" || len(parts[1]) != len(a.cfg.Token) || subtle.ConstantTimeCompare([]byte(parts[1]), []byte(a.cfg.Token)) != 1 {
+		c, err := r.Cookie(a.cookieName())
+		if err != nil || c.Value == "" {
 			writeError(w, r, 401, "unauthorized", "Authentication is required.")
 			return
 		}
-		u, err := a.service.WebUser(r.Context(), a.cfg.TelegramUserID)
+		u, err := a.service.SessionByToken(r.Context(), c.Value, a.cfg.Now())
 		if err != nil {
 			writeError(w, r, 401, "unauthorized", "Authentication is required.")
 			return
 		}
 		w.Header().Set("Pragma", "no-cache")
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, Principal{UserID: u.ID})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, Principal{UserID: u.ID, SessionToken: c.Value})))
 	})
 }
 func principal(r *http.Request) (Principal, bool) {
 	p, ok := r.Context().Value(principalKey).(Principal)
 	return p, ok && p.UserID > 0
 }
+
+type rateBucket struct {
+	count int
+	reset time.Time
+}
+type rateLimiter struct {
+	mu      sync.Mutex
+	secret  []byte
+	buckets map[string]rateBucket
+}
+
+func newRateLimiter() *rateLimiter {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return &rateLimiter{secret: b, buckets: map[string]rateBucket{}}
+}
+func (l *rateLimiter) allow(scope, value string, limit int, window time.Duration, now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	mac := hmac.New(sha256.New, l.secret)
+	_, _ = mac.Write([]byte(scope + ":" + value))
+	key := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.buckets[key]
+	if b.reset.IsZero() || now.After(b.reset) {
+		b = rateBucket{reset: now.Add(window)}
+	}
+	b.count++
+	l.buckets[key] = b
+	return b.count <= limit
+}
+
+func isUnsafe(m string) bool {
+	return m == http.MethodPost || m == http.MethodPut || m == http.MethodPatch || m == http.MethodDelete
+}
+func (a *API) cookieName() string {
+	if a.cfg.SessionCookieName != "" {
+		return a.cfg.SessionCookieName
+	}
+	return "lead_log_session"
+}
+func (a *API) setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: a.cookieName(), Value: token, Path: "/", Expires: expires, HttpOnly: true, Secure: a.cfg.SessionSecure, SameSite: http.SameSiteLaxMode})
+}
+func (a *API) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: a.cookieName(), Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0), HttpOnly: true, Secure: a.cfg.SessionSecure, SameSite: http.SameSiteLaxMode})
+}
+func (a *API) authCfg() services.AuthConfig {
+	return services.AuthConfig{SessionTTL: a.cfg.SessionTTL, PasswordMinLength: a.cfg.PasswordMinLength}
+}
+func safeCurrentUser(u store.CurrentUser, st store.TelegramStatus) map[string]any {
+	name := ""
+	if u.DisplayName != nil {
+		name = *u.DisplayName
+	}
+	email := ""
+	if u.Email != nil {
+		email = *u.Email
+	}
+	return map[string]any{"user": map[string]any{"display_name": name, "email": email, "timezone": u.Timezone, "response_language": u.ResponseLanguage}, "telegram": st}
+}
+
+func (a *API) register(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, 405, "method_not_allowed", "Method not allowed.")
+		return
+	}
+	var in services.RegisterInput
+	if decode(w, r, &in) != "" {
+		return
+	}
+	_, norm, _ := services.NormalizeEmail(in.Email)
+	if norm != "" && !a.limiter.allow("register", norm, 5, time.Hour, a.cfg.Now()) {
+		writeError(w, r, 429, "rate_limited", "Too many requests.")
+		return
+	}
+	sess, err := a.service.Register(r.Context(), in, a.authCfg())
+	if errors.Is(err, services.ErrDuplicateEmail) {
+		writeError(w, r, 409, "conflict", "The account could not be created.")
+		return
+	}
+	if err != nil {
+		validation(w, r)
+		return
+	}
+	a.setSessionCookie(w, sess.Token, sess.ExpiresAt)
+	st, _ := a.service.TelegramStatus(r.Context(), sess.User.ID)
+	writeJSON(w, 201, map[string]any{"data": safeCurrentUser(sess.User, st)})
+}
+func (a *API) login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, 405, "method_not_allowed", "Method not allowed.")
+		return
+	}
+	var in services.LoginInput
+	if decode(w, r, &in) != "" {
+		return
+	}
+	_, norm, _ := services.NormalizeEmail(in.Email)
+	if norm != "" && !a.limiter.allow("login", norm, 10, 15*time.Minute, a.cfg.Now()) {
+		writeError(w, r, 429, "rate_limited", "Too many requests.")
+		return
+	}
+	sess, err := a.service.Login(r.Context(), in, a.authCfg())
+	if errors.Is(err, services.ErrInvalidCredentials) {
+		writeError(w, r, 401, "unauthorized", "Invalid email or password.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	a.setSessionCookie(w, sess.Token, sess.ExpiresAt)
+	st, _ := a.service.TelegramStatus(r.Context(), sess.User.ID)
+	writeJSON(w, 200, map[string]any{"data": safeCurrentUser(sess.User, st)})
+}
+func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	_ = a.service.RevokeSession(r.Context(), p.SessionToken)
+	a.clearSessionCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+func (a *API) session(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	u, err := a.service.CurrentUser(r.Context(), p.UserID)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	st, err := a.service.TelegramStatus(r.Context(), p.UserID)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": safeCurrentUser(u, st)})
+}
+func (a *API) telegramLink(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	if !a.limiter.allow("telegram_link", strconv.FormatInt(p.UserID, 10), 10, time.Hour, a.cfg.Now()) {
+		writeError(w, r, 429, "rate_limited", "Too many requests.")
+		return
+	}
+	tok, exp, err := a.service.CreateTelegramLink(r.Context(), p.UserID, a.cfg.TelegramLinkTokenTTL)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	bot := strings.TrimPrefix(a.cfg.TelegramBotUsername, "@")
+	url := "https://t.me/" + bot + "?start=link_" + tok
+	writeJSON(w, 200, map[string]any{"data": map[string]any{"url": url, "expires_at": exp}})
+}
+func (a *API) telegramStatus(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	st, err := a.service.TelegramStatus(r.Context(), p.UserID)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": st})
+}
+func (a *API) telegramUnlink(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	if err := a.service.UnlinkTelegram(r.Context(), p.UserID); err != nil {
+		internal(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
@@ -179,19 +382,7 @@ func (a *API) ready(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]string{"status": "ready"})
 }
-func (a *API) me(w http.ResponseWriter, r *http.Request) {
-	p, _ := principal(r)
-	u, err := a.service.WebUser(r.Context(), a.cfg.TelegramUserID)
-	if err != nil || u.ID != p.UserID {
-		internal(w, r)
-		return
-	}
-	name := ""
-	if u.Username != nil {
-		name = *u.Username
-	}
-	writeJSON(w, 200, map[string]any{"data": dto.Me{DisplayName: name, ResponseLanguage: a.cfg.ResponseLanguage, Timezone: a.cfg.Timezone}})
-}
+func (a *API) me(w http.ResponseWriter, r *http.Request) { a.session(w, r) }
 
 func (a *API) notes(w http.ResponseWriter, r *http.Request) {
 	p, _ := principal(r)

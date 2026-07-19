@@ -25,7 +25,29 @@ type fakeService struct {
 	created bool
 }
 
-func (f *fakeService) WebUser(context.Context, int64) (store.WebUser, error) { return f.user, nil }
+func (f *fakeService) Register(context.Context, services.RegisterInput, services.AuthConfig) (services.AuthSession, error) {
+	return services.AuthSession{}, nil
+}
+func (f *fakeService) Login(context.Context, services.LoginInput, services.AuthConfig) (services.AuthSession, error) {
+	return services.AuthSession{}, nil
+}
+func (f *fakeService) SessionByToken(_ context.Context, token string, _ time.Time) (store.CurrentUser, error) {
+	if token != "top-secret-token" {
+		return store.CurrentUser{}, pgx.ErrNoRows
+	}
+	return store.CurrentUser{ID: f.user.ID, Timezone: "UTC", ResponseLanguage: "en"}, nil
+}
+func (f *fakeService) RevokeSession(context.Context, string) error { return nil }
+func (f *fakeService) CurrentUser(context.Context, int64) (store.CurrentUser, error) {
+	return store.CurrentUser{ID: f.user.ID, Timezone: "UTC", ResponseLanguage: "en"}, nil
+}
+func (f *fakeService) TelegramStatus(context.Context, int64) (store.TelegramStatus, error) {
+	return store.TelegramStatus{}, nil
+}
+func (f *fakeService) CreateTelegramLink(context.Context, int64, time.Duration) (string, time.Time, error) {
+	return "tok", time.Now().Add(time.Minute), nil
+}
+func (f *fakeService) UnlinkTelegram(context.Context, int64) error { return nil }
 func (f *fakeService) CreatePendingNote(_ context.Context, uid int64, text string) (store.APINote, error) {
 	f.created = true
 	return store.APINote{ID: 9, ProcessingStatus: "pending", CreatedAt: time.Now()}, nil
@@ -80,15 +102,18 @@ func TestRunePreviewUTF8(t *testing.T) {
 func (p *pinger) Ping(context.Context) error { p.calls++; return p.err }
 func testAPI(t *testing.T, db *pinger, log io.Writer) http.Handler {
 	t.Helper()
-	return New(&fakeService{user: store.WebUser{ID: 7}}, db, Config{Token: "top-secret-token", TelegramUserID: 123, AllowedOrigins: []string{"http://localhost:3000"}, ResponseLanguage: "en", Timezone: "UTC"}, slog.New(slog.NewTextHandler(log, nil)))
+	return New(&fakeService{user: store.WebUser{ID: 7}}, db, Config{AllowedOrigins: []string{"http://localhost:3000"}, ResponseLanguage: "en", Timezone: "UTC", SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(log, nil)))
 }
 func request(h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
+		r.AddCookie(&http.Cookie{Name: "lead_log_session", Value: token})
 	}
 	if body != "" {
 		r.Header.Set("Content-Type", "application/json")
+	}
+	if method == "POST" || method == "PATCH" || method == "DELETE" {
+		r.Header.Set("Origin", "http://localhost:3000")
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -118,7 +143,7 @@ func TestAuthenticationCORSAndSafeMe(t *testing.T) {
 		}
 	}
 	r := httptest.NewRequest("GET", "/api/v1/me", nil)
-	r.Header.Set("Authorization", "Bearer top-secret-token")
+	r.AddCookie(&http.Cookie{Name: "lead_log_session", Value: "top-secret-token"})
 	r.Header.Set("Origin", "http://localhost:3000")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

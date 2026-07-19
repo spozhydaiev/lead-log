@@ -39,9 +39,13 @@ type Config struct {
 	HTTPReadTimeout                 time.Duration
 	HTTPWriteTimeout                time.Duration
 	HTTPIdleTimeout                 time.Duration
-	HTTPAllowedOrigins              []string
-	WebAPIToken                     string
-	WebAPITelegramUserID            int64
+	FrontendOrigins                 []string
+	AuthSessionCookieName           string
+	AuthSessionTTL                  time.Duration
+	AuthSessionSecure               bool
+	AuthPasswordMinLength           int
+	TelegramBotUsername             string
+	TelegramLinkTokenTTL            time.Duration
 }
 
 func Load() Config {
@@ -111,18 +115,18 @@ func Load() Config {
 		HTTPReadTimeout:                 parseDuration("HTTP_READ_TIMEOUT", "10s"),
 		HTTPWriteTimeout:                parseDuration("HTTP_WRITE_TIMEOUT", "30s"),
 		HTTPIdleTimeout:                 parseDuration("HTTP_IDLE_TIMEOUT", "60s"),
-		HTTPAllowedOrigins:              parseCSV(os.Getenv("HTTP_ALLOWED_ORIGINS")),
+		FrontendOrigins:                 parseCSV(envOr("FRONTEND_ORIGINS", os.Getenv("HTTP_ALLOWED_ORIGINS"))),
+		AuthSessionCookieName:           envOr("AUTH_SESSION_COOKIE_NAME", "lead_log_session"),
+		AuthSessionTTL:                  parseDuration("AUTH_SESSION_TTL", "720h"),
+		AuthSessionSecure:               envOr("AUTH_SESSION_SECURE", "true") != "false",
+		AuthPasswordMinLength:           parsePositiveInt("AUTH_PASSWORD_MIN_LENGTH", 12),
+		TelegramBotUsername:             envOr("TELEGRAM_BOT_USERNAME", "LeadLogBot"),
+		TelegramLinkTokenTTL:            parseDuration("TELEGRAM_LINK_TOKEN_TTL", "10m"),
 	}
 	if cfg.HTTPEnabled {
-		cfg.WebAPIToken = mustEnv("WEB_API_TOKEN")
-		id, parseErr := strconv.ParseInt(mustEnv("WEB_API_TELEGRAM_USER_ID"), 10, 64)
-		if parseErr != nil || id <= 0 || !IsTelegramUserAllowed(cfg.AllowedTelegramUserIDs, id) {
-			panic("invalid env var WEB_API_TELEGRAM_USER_ID: must identify an allowed Telegram user")
-		}
-		cfg.WebAPITelegramUserID = id
-		for _, origin := range cfg.HTTPAllowedOrigins {
+		for _, origin := range cfg.FrontendOrigins {
 			if origin == "*" {
-				panic("invalid env var HTTP_ALLOWED_ORIGINS: wildcard is not allowed")
+				panic("invalid env var FRONTEND_ORIGINS: wildcard is not allowed")
 			}
 		}
 	}

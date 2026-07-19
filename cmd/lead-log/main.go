@@ -68,7 +68,7 @@ func main() {
 
 	var httpServerErr <-chan error
 	if cfg.HTTPEnabled {
-		handler := httpapi.New(service, pool, httpapi.Config{Token: cfg.WebAPIToken, TelegramUserID: cfg.WebAPITelegramUserID, AllowedOrigins: cfg.HTTPAllowedOrigins, ResponseLanguage: string(cfg.ResponseLanguage), Timezone: cfg.DailySummaryTimezone}, logger.With("component", "http_api"))
+		handler := httpapi.New(service, pool, httpapi.Config{AllowedOrigins: cfg.FrontendOrigins, ResponseLanguage: string(cfg.ResponseLanguage), Timezone: cfg.DailySummaryTimezone, SessionCookieName: cfg.AuthSessionCookieName, SessionTTL: cfg.AuthSessionTTL, SessionSecure: cfg.AuthSessionSecure, PasswordMinLength: cfg.AuthPasswordMinLength, TelegramBotUsername: cfg.TelegramBotUsername, TelegramLinkTokenTTL: cfg.TelegramLinkTokenTTL}, logger.With("component", "http_api"))
 		srv := httpapi.NewServer(httpapi.ServerConfig{Address: fmt.Sprintf("%s:%d", cfg.HTTPAddress, cfg.HTTPPort), ReadTimeout: cfg.HTTPReadTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: cfg.HTTPIdleTimeout}, handler)
 		ch := make(chan error, 1)
 		httpServerErr = ch

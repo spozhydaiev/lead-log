@@ -122,23 +122,29 @@ func (s *Store) logDBError(operation string, err error) {
 }
 
 func (s *Store) UpsertUser(ctx context.Context, telegramUserID int64, username string) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
 	var id int64
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO users (telegram_user_id, username)
-		VALUES ($1, $2)
-		ON CONFLICT (telegram_user_id)
-		DO UPDATE SET username = EXCLUDED.username
-		RETURNING id
-	`, telegramUserID, username).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT user_id FROM telegram_accounts WHERE telegram_user_id=$1`, telegramUserID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `INSERT INTO users (telegram_user_id, username, display_name) VALUES ($1,$2,NULLIF($2,'')) RETURNING id`, telegramUserID, username).Scan(&id)
+		if err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO telegram_accounts (user_id,telegram_user_id,linked_at) VALUES ($1,$2,now())`, id, telegramUserID)
+		}
+	}
 	if err != nil {
 		s.logDBError("store.upsert_user", err)
+		return 0, err
 	}
-	return id, err
+	return id, tx.Commit(ctx)
 }
 
 func (s *Store) WebUserByTelegramID(ctx context.Context, telegramUserID int64) (WebUser, error) {
 	var u WebUser
-	err := s.pool.QueryRow(ctx, `SELECT id, username FROM users WHERE telegram_user_id=$1`, telegramUserID).Scan(&u.ID, &u.Username)
+	err := s.pool.QueryRow(ctx, `SELECT u.id, u.display_name FROM users u JOIN telegram_accounts ta ON ta.user_id=u.id WHERE ta.telegram_user_id=$1`, telegramUserID).Scan(&u.ID, &u.Username)
 	return u, err
 }
 
@@ -1154,4 +1160,192 @@ func (s *Store) ListEntityMentionsByNote(ctx context.Context, userID, noteID int
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+type CurrentUser struct {
+	ID               int64
+	Email            *string
+	DisplayName      *string
+	Timezone         string
+	ResponseLanguage string
+}
+
+type TelegramStatus struct {
+	Connected bool       `json:"connected"`
+	LinkedAt  *time.Time `json:"linked_at"`
+}
+
+type LinkConsumeResult string
+
+const (
+	LinkConsumeSuccess  LinkConsumeResult = "success"
+	LinkConsumeInvalid  LinkConsumeResult = "invalid"
+	LinkConsumeConflict LinkConsumeResult = "conflict"
+)
+
+func (s *Store) CreateUserWithIdentityAndSession(ctx context.Context, email, emailNorm, passwordHash, displayName, timezone, language, tokenHash string, expiresAt time.Time) (CurrentUser, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	defer tx.Rollback(ctx)
+	var u CurrentUser
+	err = tx.QueryRow(ctx, `INSERT INTO users (display_name, timezone, response_language) VALUES (NULLIF($1,''),$2,$3) RETURNING id,display_name,timezone,response_language`, displayName, timezone, language).Scan(&u.ID, &u.DisplayName, &u.Timezone, &u.ResponseLanguage)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO auth_identities (user_id,provider,email,email_normalized,password_hash) VALUES ($1,'local',$2,$3,$4)`, u.ID, email, emailNorm, passwordHash)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO web_sessions (user_id,token_hash,expires_at,last_seen_at) VALUES ($1,$2,$3,now())`, u.ID, tokenHash, expiresAt)
+	if err != nil {
+		return CurrentUser{}, err
+	}
+	u.Email = &email
+	return u, tx.Commit(ctx)
+}
+
+func (s *Store) LocalIdentityByEmail(ctx context.Context, emailNorm string) (int64, string, error) {
+	var userID int64
+	var hash string
+	err := s.pool.QueryRow(ctx, `SELECT user_id,password_hash FROM auth_identities WHERE provider='local' AND email_normalized=$1`, emailNorm).Scan(&userID, &hash)
+	return userID, hash, err
+}
+func (s *Store) CreateSession(ctx context.Context, userID int64, tokenHash string, expiresAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO web_sessions (user_id,token_hash,expires_at,last_seen_at) VALUES ($1,$2,$3,now())`, userID, tokenHash, expiresAt)
+	return err
+}
+func (s *Store) CurrentUserByID(ctx context.Context, userID int64) (CurrentUser, error) {
+	var u CurrentUser
+	err := s.pool.QueryRow(ctx, `SELECT u.id, ai.email, u.display_name, u.timezone, u.response_language FROM users u LEFT JOIN LATERAL (SELECT email FROM auth_identities WHERE user_id=u.id AND provider='local' ORDER BY id LIMIT 1) ai ON true WHERE u.id=$1`, userID).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Timezone, &u.ResponseLanguage)
+	return u, err
+}
+func (s *Store) CurrentUserBySessionHash(ctx context.Context, tokenHash string, now time.Time) (CurrentUser, error) {
+	var u CurrentUser
+	var last time.Time
+	err := s.pool.QueryRow(ctx, `SELECT u.id, ai.email, u.display_name, u.timezone, u.response_language, ws.last_seen_at FROM web_sessions ws JOIN users u ON u.id=ws.user_id LEFT JOIN LATERAL (SELECT email FROM auth_identities WHERE user_id=u.id AND provider='local' ORDER BY id LIMIT 1) ai ON true WHERE ws.token_hash=$1 AND ws.expires_at>$2 AND ws.revoked_at IS NULL`, tokenHash, now).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Timezone, &u.ResponseLanguage, &last)
+	if err != nil {
+		return u, err
+	}
+	if now.Sub(last) > time.Hour {
+		_, _ = s.pool.Exec(ctx, `UPDATE web_sessions SET last_seen_at=$2 WHERE token_hash=$1 AND last_seen_at<$2 - interval '1 hour'`, tokenHash, now)
+	}
+	return u, nil
+}
+func (s *Store) RevokeSession(ctx context.Context, tokenHash string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE web_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE token_hash=$1`, tokenHash)
+	return err
+}
+func (s *Store) TelegramStatus(ctx context.Context, userID int64) (TelegramStatus, error) {
+	var st TelegramStatus
+	var linked *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT linked_at FROM telegram_accounts WHERE user_id=$1`, userID).Scan(&linked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	st.Connected = true
+	st.LinkedAt = linked
+	return st, nil
+}
+func (s *Store) CreateTelegramLinkToken(ctx context.Context, userID int64, tokenHash string, expiresAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `UPDATE telegram_link_tokens SET used_at=now() WHERE user_id=$1 AND used_at IS NULL`, userID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO telegram_link_tokens (user_id,token_hash,expires_at) VALUES ($1,$2,$3)`, userID, tokenHash, expiresAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func (s *Store) UnlinkTelegram(ctx context.Context, userID int64) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM telegram_accounts WHERE user_id=$1`, userID)
+	return err
+}
+func (s *Store) ResolveTelegramUser(ctx context.Context, telegramUserID int64, chatID int64) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `UPDATE telegram_accounts SET telegram_chat_id=$2,updated_at=now() WHERE telegram_user_id=$1 RETURNING user_id`, telegramUserID, chatID).Scan(&id)
+	return id, err
+}
+func (s *Store) LinkTelegramByToken(ctx context.Context, rawHash string, telegramUserID, chatID int64, newSessionHash string, sessionExpires time.Time) (LinkConsumeResult, int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return LinkConsumeInvalid, 0, err
+	}
+	defer tx.Rollback(ctx)
+	var target int64
+	err = tx.QueryRow(ctx, `SELECT user_id FROM telegram_link_tokens WHERE token_hash=$1 AND expires_at>now() AND used_at IS NULL FOR UPDATE`, rawHash).Scan(&target)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return LinkConsumeInvalid, 0, nil
+	}
+	if err != nil {
+		return LinkConsumeInvalid, 0, err
+	}
+	var existing int64
+	err = tx.QueryRow(ctx, `SELECT user_id FROM telegram_accounts WHERE telegram_user_id=$1 FOR UPDATE`, telegramUserID).Scan(&existing)
+	if err == nil && existing != target {
+		var webCount int
+		_ = tx.QueryRow(ctx, `SELECT count(*) FROM auth_identities WHERE user_id=$1 AND provider='local'`, existing).Scan(&webCount)
+		if webCount > 0 {
+			return LinkConsumeConflict, 0, nil
+		}
+		var targetData int
+		_ = tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM notes WHERE user_id=$1)+(SELECT count(*) FROM actions WHERE user_id=$1)+(SELECT count(*) FROM people WHERE user_id=$1)+(SELECT count(*) FROM people_notes WHERE user_id=$1)+(SELECT count(*) FROM decisions WHERE user_id=$1)`, target).Scan(&targetData)
+		var identityCount int
+		_ = tx.QueryRow(ctx, `SELECT count(*) FROM auth_identities WHERE user_id=$1`, target).Scan(&identityCount)
+		if targetData > 0 || identityCount != 1 {
+			return LinkConsumeConflict, 0, nil
+		}
+		_, err = tx.Exec(ctx, `UPDATE auth_identities SET user_id=$1,updated_at=now() WHERE user_id=$2`, existing, target)
+		if err != nil {
+			return LinkConsumeInvalid, 0, err
+		}
+		_, err = tx.Exec(ctx, `UPDATE web_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1`, target)
+		if err != nil {
+			return LinkConsumeInvalid, 0, err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO web_sessions (user_id,token_hash,expires_at,last_seen_at) VALUES ($1,$2,$3,now())`, existing, newSessionHash, sessionExpires)
+		if err != nil {
+			return LinkConsumeInvalid, 0, err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM users WHERE id=$1`, target)
+		if err != nil {
+			return LinkConsumeInvalid, 0, err
+		}
+		target = existing
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		_, err = tx.Exec(ctx, `INSERT INTO telegram_accounts (user_id,telegram_user_id,telegram_chat_id,linked_at) VALUES ($1,$2,$3,now())`, target, telegramUserID, chatID)
+		if err != nil {
+			return LinkConsumeConflict, 0, nil
+		}
+	} else if err != nil {
+		return LinkConsumeInvalid, 0, err
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE telegram_accounts SET telegram_chat_id=$2,updated_at=now() WHERE telegram_user_id=$1`, telegramUserID, chatID)
+		if err != nil {
+			return LinkConsumeInvalid, 0, err
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE telegram_link_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL`, rawHash)
+	if err != nil {
+		return LinkConsumeInvalid, 0, err
+	}
+	return LinkConsumeSuccess, target, tx.Commit(ctx)
+}
+func (s *Store) CleanupAuth(ctx context.Context, now time.Time, limit int) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM web_sessions WHERE id IN (SELECT id FROM web_sessions WHERE expires_at<$1 OR (revoked_at IS NOT NULL AND revoked_at<$1 - interval '7 days') ORDER BY id LIMIT $2)`, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	tag2, err := s.pool.Exec(ctx, `DELETE FROM telegram_link_tokens WHERE id IN (SELECT id FROM telegram_link_tokens WHERE expires_at<$1 OR used_at IS NOT NULL ORDER BY id LIMIT $2)`, now, limit)
+	return tag.RowsAffected() + tag2.RowsAffected(), err
 }
