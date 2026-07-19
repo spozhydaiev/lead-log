@@ -139,6 +139,33 @@ func (s *Service) WebUser(ctx context.Context, telegramID int64) (store.WebUser,
 func (s *Service) ListNotes(ctx context.Context, userID int64, limit int, c *store.PageCursor) ([]store.APINote, error) {
 	return s.store.ListAPINotes(ctx, userID, limit, c)
 }
+func (s *Service) ListNotesHistory(ctx context.Context, userID int64, f NotesHistoryFilter, limit int, c *store.PageCursor) (NotesHistoryView, error) {
+	notes, err := s.store.ListAPINotesHistory(ctx, userID, store.NotesListFilter(f), limit, c)
+	if err != nil {
+		return NotesHistoryView{}, err
+	}
+	ids := make([]int64, len(notes))
+	for i, n := range notes {
+		ids[i] = n.ID
+	}
+	counts, err := s.store.NoteCounts(ctx, userID, ids)
+	if err != nil {
+		return NotesHistoryView{}, err
+	}
+	people, err := s.store.HighlightsForNotes(ctx, userID, ids, 3)
+	if err != nil {
+		return NotesHistoryView{}, err
+	}
+	entities, err := s.store.EntitiesForNotes(ctx, userID, ids, 6)
+	if err != nil {
+		return NotesHistoryView{}, err
+	}
+	v := NotesHistoryView{Notes: []TodayNote{}}
+	for _, n := range notes {
+		v.Notes = append(v.Notes, TodayNote{APINote: n, Counts: counts[n.ID], People: people[n.ID], Entities: entities[n.ID]})
+	}
+	return v, nil
+}
 func (s *Service) ListActions(ctx context.Context, userID int64, status string, limit int, c *store.PageCursor) ([]store.APIAction, error) {
 	return s.store.ListAPIActions(ctx, userID, status, limit, c)
 }

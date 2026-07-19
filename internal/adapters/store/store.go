@@ -73,6 +73,14 @@ type APINote struct {
 	Tags             []string
 	ProcessingStatus string
 	CreatedAt        time.Time
+	ProcessedAt      *time.Time
+}
+
+type NotesListFilter struct {
+	FromUTC *time.Time
+	ToUTC   *time.Time
+	Status  string
+	Query   string
 }
 type APIAction struct {
 	ID            int64
@@ -149,7 +157,21 @@ func (s *Store) WebUserByTelegramID(ctx context.Context, telegramUserID int64) (
 }
 
 func (s *Store) ListAPINotes(ctx context.Context, userID int64, limit int, cursor *PageCursor) ([]APINote, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at FROM notes WHERE user_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4`, userID, cursorTime(cursor), cursorID(cursor), limit)
+	return s.ListAPINotesHistory(ctx, userID, NotesListFilter{}, limit, cursor)
+}
+
+func (s *Store) ListAPINotesHistory(ctx context.Context, userID int64, f NotesListFilter, limit int, cursor *PageCursor) ([]APINote, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id,raw_text,summary,tags,processing_status,created_at,processed_at
+		FROM notes
+		WHERE user_id=$1
+		  AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3))
+		  AND ($4::timestamptz IS NULL OR created_at >= $4)
+		  AND ($5::timestamptz IS NULL OR created_at < $5)
+		  AND ($6::text = '' OR processing_status = $6)
+		  AND ($7::text = '' OR (raw_text || ' ' || COALESCE(summary,'')) ILIKE '%' || $7 || '%')
+		ORDER BY created_at DESC,id DESC
+		LIMIT $8`, userID, cursorTime(cursor), cursorID(cursor), f.FromUTC, f.ToUTC, f.Status, f.Query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +179,7 @@ func (s *Store) ListAPINotes(ctx context.Context, userID int64, limit int, curso
 	var out []APINote
 	for rows.Next() {
 		var n APINote
-		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt, &n.ProcessedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -201,7 +223,7 @@ func (s *Store) SetActionStatus(ctx context.Context, userID, actionID int64, sta
 }
 
 func (s *Store) ListTodayNotes(ctx context.Context, userID int64, from, to time.Time, limit int) ([]APINote, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at FROM notes WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 ORDER BY created_at DESC,id DESC LIMIT $4`, userID, from, to, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id,raw_text,summary,tags,processing_status,created_at,processed_at FROM notes WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 ORDER BY created_at DESC,id DESC LIMIT $4`, userID, from, to, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +231,7 @@ func (s *Store) ListTodayNotes(ctx context.Context, userID int64, from, to time.
 	var out []APINote
 	for rows.Next() {
 		var n APINote
-		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.RawText, &n.Summary, &n.Tags, &n.ProcessingStatus, &n.CreatedAt, &n.ProcessedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -337,7 +359,7 @@ func (s *Store) SaveRawNote(ctx context.Context, userID int64, raw string) (int6
 
 func (s *Store) SaveRawAPINote(ctx context.Context, userID int64, raw string) (APINote, error) {
 	var note APINote
-	err := s.pool.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text) VALUES ($1,$2) RETURNING id,raw_text,summary,tags,processing_status,created_at`, userID, raw).Scan(&note.ID, &note.RawText, &note.Summary, &note.Tags, &note.ProcessingStatus, &note.CreatedAt)
+	err := s.pool.QueryRow(ctx, `INSERT INTO notes (user_id, raw_text) VALUES ($1,$2) RETURNING id,raw_text,summary,tags,processing_status,created_at,processed_at`, userID, raw).Scan(&note.ID, &note.RawText, &note.Summary, &note.Tags, &note.ProcessingStatus, &note.CreatedAt, &note.ProcessedAt)
 	if err != nil {
 		s.logDBError("store.save_raw_api_note", err)
 	}

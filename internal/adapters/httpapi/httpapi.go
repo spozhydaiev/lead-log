@@ -29,6 +29,7 @@ const maxNoteLength = 10000
 type Principal struct {
 	UserID       int64
 	SessionToken string
+	Timezone     string
 }
 type contextKey int
 
@@ -48,6 +49,7 @@ type Service interface {
 	UnlinkTelegram(context.Context, int64) error
 	CreatePendingNote(context.Context, int64, string) (store.APINote, error)
 	ListNotes(context.Context, int64, int, *store.PageCursor) ([]store.APINote, error)
+	ListNotesHistory(context.Context, int64, services.NotesHistoryFilter, int, *store.PageCursor) (services.NotesHistoryView, error)
 	ListActions(context.Context, int64, string, int, *store.PageCursor) ([]store.APIAction, error)
 	SetActionStatus(context.Context, int64, int64, string) (store.APIAction, error)
 	GetToday(context.Context, int64, time.Time) (services.TodayView, error)
@@ -192,7 +194,7 @@ func (a *API) auth(next http.Handler) http.Handler {
 			return
 		}
 		w.Header().Set("Pragma", "no-cache")
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, Principal{UserID: u.ID, SessionToken: c.Value})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, Principal{UserID: u.ID, SessionToken: c.Value, Timezone: u.Timezone})))
 	})
 }
 func principal(r *http.Request) (Principal, bool) {
@@ -415,29 +417,46 @@ func (a *API) notes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 201, map[string]any{"data": map[string]any{"id": publicID("note", n.ID), "processing_status": n.ProcessingStatus, "created_at": n.CreatedAt}})
 		return
 	}
-	limit, cursor, ok := page(r)
+	limit, filter, hash, cursor, ok := notesPage(r, p.Timezone)
 	if !ok {
 		validation(w, r)
 		return
 	}
-	items, err := a.service.ListNotes(r.Context(), p.UserID, limit+1, cursor)
+	v, err := a.service.ListNotesHistory(r.Context(), p.UserID, filter, limit+1, cursor)
 	if err != nil {
 		internal(w, r)
 		return
 	}
-	next := nextCursorNotes(items, limit)
-	if len(items) > limit {
-		items = items[:limit]
+	next := nextCursorTodayNotes(v.Notes, limit, hash)
+	hasMore := len(v.Notes) > limit
+	if hasMore {
+		v.Notes = v.Notes[:limit]
 	}
-	out := make([]dto.Note, 0, len(items))
-	for _, n := range items {
-		tags := n.Tags
-		if tags == nil {
-			tags = []string{}
+	out := dto.NotesHistory{Items: []dto.TodayNote{}, Page: dto.NotesPage{NextCursor: next, HasMore: hasMore}}
+	for _, n := range v.Notes {
+		out.Items = append(out.Items, mapPreviewNote(n))
+	}
+	a.logger.Info("notes list completed", "component", "http_api", "operation", "notes.list", "operation_id", requestID(r), "result", "success", "result_count", len(out.Items), "has_more", hasMore, "has_status_filter", filter.Status != "", "has_date_filter", filter.FromUTC != nil || filter.ToUTC != nil, "has_search_filter", filter.Query != "")
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func mapPreviewNote(n services.TodayNote) dto.TodayNote {
+	x := dto.TodayNote{ID: publicID("note", n.ID), RawText: runePreview(n.RawText, 400), Summary: n.Summary, ProcessingStatus: n.ProcessingStatus, CreatedAt: n.CreatedAt, ProcessedAt: n.ProcessedAt, ExtractedCounts: dto.ExtractedCounts{Actions: n.Counts.Actions, People: n.Counts.People, Decisions: n.Counts.Decisions, Entities: n.Counts.Entities}, Preview: dto.NotePreview{People: []dto.LinkedPerson{}, Tickets: []string{}, Tags: []string{}}}
+	seen := map[int64]bool{}
+	for _, p := range n.People {
+		if !seen[p.PersonID] && len(x.Preview.People) < 3 {
+			x.Preview.People = append(x.Preview.People, dto.LinkedPerson{ID: publicID("person", p.PersonID), DisplayName: p.Name})
+			seen[p.PersonID] = true
 		}
-		out = append(out, dto.Note{ID: publicID("note", n.ID), RawText: n.RawText, Summary: n.Summary, Tags: tags, ProcessingStatus: n.ProcessingStatus, CreatedAt: n.CreatedAt})
 	}
-	writeJSON(w, 200, map[string]any{"data": out, "pagination": dto.Pagination{Limit: limit, NextCursor: next}})
+	for _, e := range n.Entities {
+		if e.Type == "ticket" && len(x.Preview.Tickets) < 3 {
+			x.Preview.Tickets = append(x.Preview.Tickets, e.Value)
+		} else if e.Type != "ticket" && len(x.Preview.Tags) < 3 {
+			x.Preview.Tags = append(x.Preview.Tags, e.Value)
+		}
+	}
+	return x
 }
 func (a *API) actions(w http.ResponseWriter, r *http.Request) {
 	p, _ := principal(r)
@@ -527,23 +546,7 @@ func (a *API) today(w http.ResponseWriter, r *http.Request) {
 	}
 	out := dto.Today{Date: v.Date, Timezone: v.Timezone, Notes: []dto.TodayNote{}, OpenActions: []dto.Action{}, DailySummary: dto.DailySummary{Date: v.Date, Status: v.DailySummary.Status, Counters: dto.DailyCounters{OpenLoops: v.DailySummary.OpenLoops, Decisions: v.DailySummary.Decisions, PeopleMentioned: v.DailySummary.PeopleMentioned}, ShortSummary: v.DailySummary.ShortSummary, GeneratedAt: v.DailySummary.GeneratedAt}}
 	for _, n := range v.Notes {
-		raw := runePreview(n.RawText, 400)
-		x := dto.TodayNote{ID: publicID("note", n.ID), RawText: raw, Summary: n.Summary, ProcessingStatus: n.ProcessingStatus, CreatedAt: n.CreatedAt, ExtractedCounts: dto.ExtractedCounts{Actions: n.Counts.Actions, People: n.Counts.People, Decisions: n.Counts.Decisions, Entities: n.Counts.Entities}, Preview: dto.NotePreview{People: []dto.LinkedPerson{}, Tickets: []string{}, Tags: []string{}}}
-		seen := map[int64]bool{}
-		for _, p := range n.People {
-			if !seen[p.PersonID] && len(x.Preview.People) < 3 {
-				x.Preview.People = append(x.Preview.People, dto.LinkedPerson{ID: publicID("person", p.PersonID), DisplayName: p.Name})
-				seen[p.PersonID] = true
-			}
-		}
-		for _, e := range n.Entities {
-			if e.Type == "ticket" && len(x.Preview.Tickets) < 3 {
-				x.Preview.Tickets = append(x.Preview.Tickets, e.Value)
-			} else if e.Type != "ticket" && len(x.Preview.Tags) < 3 {
-				x.Preview.Tags = append(x.Preview.Tags, e.Value)
-			}
-		}
-		out.Notes = append(out.Notes, x)
+		out.Notes = append(out.Notes, mapPreviewNote(n))
 	}
 	for _, x := range v.OpenActions {
 		out.OpenActions = append(out.OpenActions, mapAction(x))
@@ -610,6 +613,118 @@ func parsePublicID(raw, prefix string) (int64, bool) {
 	v, err := strconv.ParseInt(strings.TrimPrefix(raw, prefix+"_"), 10, 64)
 	return v, err == nil && v > 0 && strings.HasPrefix(raw, prefix+"_")
 }
+
+type notesCursor struct {
+	CreatedAt  time.Time `json:"created_at"`
+	ID         int64     `json:"id"`
+	FilterHash string    `json:"filter_hash"`
+	Version    int       `json:"v"`
+}
+
+func notesPage(r *http.Request, tz string) (int, services.NotesHistoryFilter, string, *store.PageCursor, bool) {
+	q := r.URL.Query()
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		v, e := strconv.Atoi(raw)
+		if e != nil || v < 1 || v > 50 {
+			return 0, services.NotesHistoryFilter{}, "", nil, false
+		}
+		limit = v
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		loc = time.UTC
+	}
+	var f services.NotesHistoryFilter
+	fromRaw, toRaw := q.Get("from"), q.Get("to")
+	var fromDay, toDay time.Time
+	if fromRaw != "" {
+		d, ok := parseLocalDate(fromRaw, loc)
+		if !ok {
+			return 0, f, "", nil, false
+		}
+		fromDay = d
+		u := d.UTC()
+		f.FromUTC = &u
+	}
+	if toRaw != "" {
+		d, ok := parseLocalDate(toRaw, loc)
+		if !ok {
+			return 0, f, "", nil, false
+		}
+		toDay = d
+		end := d.AddDate(0, 0, 1).UTC()
+		f.ToUTC = &end
+	}
+	if fromRaw != "" && toRaw != "" && fromDay.After(toDay) {
+		return 0, f, "", nil, false
+	}
+	if st := q.Get("status"); st != "" {
+		if st != store.NoteProcessingStatusPending && st != store.NoteProcessingStatusProcessing && st != store.NoteProcessingStatusProcessed && st != store.NoteProcessingStatusFailed {
+			return 0, f, "", nil, false
+		}
+		f.Status = st
+	}
+	if raw := strings.TrimSpace(q.Get("query")); raw != "" {
+		if len([]rune(raw)) < 2 || len([]rune(raw)) > 200 {
+			return 0, f, "", nil, false
+		}
+		f.Query = raw
+	}
+	h := notesFilterHash(f)
+	var c *store.PageCursor
+	if raw := q.Get("cursor"); raw != "" {
+		b, e := base64.RawURLEncoding.DecodeString(raw)
+		if e != nil {
+			return 0, f, "", nil, false
+		}
+		var nc notesCursor
+		if json.Unmarshal(b, &nc) != nil || nc.Version != 1 || nc.ID <= 0 || nc.CreatedAt.IsZero() || nc.FilterHash != h {
+			return 0, f, "", nil, false
+		}
+		c = &store.PageCursor{CreatedAt: nc.CreatedAt, ID: nc.ID}
+	}
+	return limit, f, h, c, true
+}
+func parseLocalDate(raw string, loc *time.Location) (time.Time, bool) {
+	if len(raw) != 10 {
+		return time.Time{}, false
+	}
+	d, err := time.ParseInLocation("2006-01-02", raw, loc)
+	if err != nil || d.Format("2006-01-02") != raw {
+		return time.Time{}, false
+	}
+	return d, true
+}
+func notesFilterHash(f services.NotesHistoryFilter) string {
+	parts := []string{"v1"}
+	if f.FromUTC != nil {
+		parts = append(parts, f.FromUTC.UTC().Format(time.RFC3339Nano))
+	} else {
+		parts = append(parts, "")
+	}
+	if f.ToUTC != nil {
+		parts = append(parts, f.ToUTC.UTC().Format(time.RFC3339Nano))
+	} else {
+		parts = append(parts, "")
+	}
+	parts = append(parts, f.Status, f.Query)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+func encodeNotesCursor(t time.Time, id int64, h string) *string {
+	b, _ := json.Marshal(notesCursor{CreatedAt: t, ID: id, FilterHash: h, Version: 1})
+	s := base64.RawURLEncoding.EncodeToString(b)
+	return &s
+}
+func nextCursorTodayNotes(v []services.TodayNote, l int, h string) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	return encodeNotesCursor(x.CreatedAt, x.ID, h)
+}
+
 func page(r *http.Request) (int, *store.PageCursor, bool) {
 	limit := 20
 	if raw := r.URL.Query().Get("limit"); raw != "" {
