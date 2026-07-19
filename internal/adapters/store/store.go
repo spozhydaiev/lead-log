@@ -1708,7 +1708,7 @@ func (s *Store) PeopleForNotes(ctx context.Context, userID int64, noteIDs []int6
 	return out, rows.Err()
 }
 func (s *Store) OpenActionsForTicket(ctx context.Context, userID int64, key string, limit int) ([]APIAction, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT a.id,a.note_id,COALESCE(a.title,''),COALESCE(a.status,'open'),p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a JOIN entity_mentions em ON em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.status='open' ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, key, limit)
+	rows, err := s.pool.Query(ctx, `SELECT a.id,a.note_id,COALESCE(a.title,''),COALESCE(a.status,'open'),p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.status='open' AND EXISTS (SELECT 1 FROM entity_mentions em WHERE em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' AND em.normalized_value=$2) ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, key, limit)
 	if err != nil {
 		return nil, apperrors.Wrap("ticket_repository.list_open_actions", apperrors.ClassDatabaseQuery, err)
 	}
