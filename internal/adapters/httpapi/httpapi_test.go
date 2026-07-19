@@ -79,6 +79,13 @@ func (f *fakeService) CreatePendingNote(_ context.Context, uid int64, text strin
 func (f *fakeService) ListNotes(context.Context, int64, int, *store.PageCursor) ([]store.APINote, error) {
 	return f.notes, nil
 }
+func (f *fakeService) ListNotesHistory(_ context.Context, _ int64, _ services.NotesHistoryFilter, _ int, _ *store.PageCursor) (services.NotesHistoryView, error) {
+	out := services.NotesHistoryView{Notes: []services.TodayNote{}}
+	for _, n := range f.notes {
+		out.Notes = append(out.Notes, services.TodayNote{APINote: n})
+	}
+	return out, nil
+}
 func (f *fakeService) ListActions(context.Context, int64, string, int, *store.PageCursor) ([]store.APIAction, error) {
 	return f.actions, nil
 }
@@ -142,6 +149,39 @@ func request(h http.Handler, method, path, body, token string) *httptest.Respons
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
+}
+
+func TestNotesHistoryContract(t *testing.T) {
+	summary := "Retry policy discussion."
+	long := strings.Repeat("🙂", 450)
+	svc := &fakeService{user: store.WebUser{ID: 7}, notes: []store.APINote{
+		{ID: 2, RawText: long, Summary: &summary, ProcessingStatus: store.NoteProcessingStatusProcessed, CreatedAt: time.Date(2026, 7, 17, 11, 24, 0, 0, time.UTC)},
+	}}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "GET", "/api/v1/notes?limit=20&from=2026-07-01&to=2026-07-17&status=processed&query=retry", "", "top-secret-token")
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"items"`, `"page"`, `"has_more":false`, `"id":"note_2"`, `"extracted_counts"`, `"preview"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+	if strings.Count(body, "🙂") > 400 || !utf8.ValidString(body) {
+		t.Fatalf("preview not bounded/valid: %s", body)
+	}
+}
+
+func TestNotesHistoryValidation(t *testing.T) {
+	h := testAPI(t, &pinger{}, io.Discard)
+	for _, path := range []string{
+		"/api/v1/notes?limit=0", "/api/v1/notes?limit=51", "/api/v1/notes?from=2026-02-30", "/api/v1/notes?from=2026-07-18&to=2026-07-17", "/api/v1/notes?status=done", "/api/v1/notes?query=x", "/api/v1/notes?cursor=bad",
+	} {
+		if w := request(h, "GET", path, "", "top-secret-token"); w.Code != 400 {
+			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+	}
 }
 
 func TestRegisterContract(t *testing.T) {

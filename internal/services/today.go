@@ -24,6 +24,8 @@ type TodayNote struct {
 	People   []store.PersonHighlight
 	Entities []store.EntityView
 }
+type NotesHistoryFilter = store.NotesListFilter
+type NotesHistoryView struct{ Notes []TodayNote }
 type TodayDailySummary struct {
 	Status, ShortSummary                  string
 	OpenLoops, Decisions, PeopleMentioned int

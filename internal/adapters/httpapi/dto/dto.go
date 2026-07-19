@@ -46,6 +46,7 @@ type TodayNote struct {
 	Summary          *string         `json:"summary"`
 	ProcessingStatus string          `json:"processing_status"`
 	CreatedAt        time.Time       `json:"created_at"`
+	ProcessedAt      *time.Time      `json:"processed_at"`
 	ExtractedCounts  ExtractedCounts `json:"extracted_counts"`
 	Preview          NotePreview     `json:"preview"`
 }
@@ -103,4 +104,12 @@ type NoteDetail struct {
 type Pagination struct {
 	Limit      int     `json:"limit"`
 	NextCursor *string `json:"next_cursor"`
+}
+type NotesPage struct {
+	NextCursor *string `json:"next_cursor"`
+	HasMore    bool    `json:"has_more"`
+}
+type NotesHistory struct {
+	Items []TodayNote `json:"items"`
+	Page  NotesPage   `json:"page"`
 }
