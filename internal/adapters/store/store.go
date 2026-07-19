@@ -151,6 +151,47 @@ type PersonProfile struct {
 	MentionCount     int
 }
 
+// TicketsListFilter constrains the Tickets workspace list query.
+type TicketsListFilter struct {
+	Query          string
+	HasOpenActions bool
+}
+
+type TicketsPageCursor struct {
+	LastMentionedAt time.Time
+	Key             string
+}
+
+type TicketListItem struct {
+	Key              string
+	FirstMentionedAt time.Time
+	LastMentionedAt  time.Time
+	MentionCount     int
+	OpenActionCount  int
+	RecentNote       *TicketRecentNote
+}
+
+type TicketRecentNote struct {
+	ID               int64
+	CreatedAt        time.Time
+	Summary          *string
+	RawText          string
+	ProcessingStatus string
+	People           []PersonRef
+}
+
+type PersonRef struct {
+	PersonID int64
+	Name     string
+}
+
+type TicketProfile struct {
+	Key              string
+	FirstMentionedAt time.Time
+	LastMentionedAt  time.Time
+	MentionCount     int
+}
+
 type PageCursor struct {
 	CreatedAt time.Time
 	ID        int64
@@ -1547,6 +1588,147 @@ func (s *Store) RecentDecisionsForPerson(ctx context.Context, userID, personID i
 			return nil, err
 		}
 		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListTicketsWorkspace(ctx context.Context, userID int64, f TicketsListFilter, limit int, cursor *TicketsPageCursor) ([]TicketListItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH base AS (
+			SELECT em.normalized_value AS key, min(n.created_at) AS first_mentioned_at, max(n.created_at) AS last_mentioned_at, count(DISTINCT em.note_id)::int AS mention_count
+			FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id
+			WHERE em.user_id=$1 AND em.entity_type='ticket'
+			  AND ($2::text = '' OR em.normalized_value ILIKE '%' || $2 || '%')
+			GROUP BY em.normalized_value
+		), page AS (
+			SELECT * FROM base
+			WHERE ($3::timestamptz IS NULL OR (last_mentioned_at,key)<($3,$4))
+			  AND ($5::bool = false OR EXISTS (SELECT 1 FROM actions a JOIN entity_mentions em2 ON em2.user_id=a.user_id AND em2.note_id=a.note_id AND em2.entity_type='ticket' AND em2.normalized_value=base.key WHERE a.user_id=$1 AND a.status='open'))
+			ORDER BY last_mentioned_at DESC,key DESC LIMIT $6
+		), open_actions AS (
+			SELECT em.normalized_value AS key, count(DISTINCT a.id)::int AS cnt FROM actions a JOIN entity_mentions em ON em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' JOIN page pg ON pg.key=em.normalized_value WHERE a.user_id=$1 AND a.status='open' GROUP BY em.normalized_value
+		), recent AS (
+			SELECT DISTINCT ON (em.normalized_value) em.normalized_value AS key,n.id,n.created_at,n.summary,n.raw_text,n.processing_status
+			FROM entity_mentions em JOIN page pg ON pg.key=em.normalized_value JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id
+			WHERE em.user_id=$1 AND em.entity_type='ticket' ORDER BY em.normalized_value,n.created_at DESC,n.id DESC
+		)
+		SELECT pg.key,pg.first_mentioned_at,pg.last_mentioned_at,pg.mention_count,COALESCE(oa.cnt,0),r.id,r.created_at,r.summary,r.raw_text,r.processing_status
+		FROM page pg LEFT JOIN open_actions oa ON oa.key=pg.key LEFT JOIN recent r ON r.key=pg.key
+		ORDER BY pg.last_mentioned_at DESC,pg.key DESC`, userID, f.Query, ticketCursorTime(cursor), ticketCursorKey(cursor), f.HasOpenActions, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TicketListItem
+	for rows.Next() {
+		var x TicketListItem
+		var rn TicketRecentNote
+		var nid *int64
+		var ct *time.Time
+		var summary *string
+		var raw, status *string
+		if err := rows.Scan(&x.Key, &x.FirstMentionedAt, &x.LastMentionedAt, &x.MentionCount, &x.OpenActionCount, &nid, &ct, &summary, &raw, &status); err != nil {
+			return nil, err
+		}
+		if nid != nil && ct != nil {
+			rn.ID = *nid
+			rn.CreatedAt = *ct
+			rn.Summary = summary
+			if raw != nil {
+				rn.RawText = *raw
+			}
+			if status != nil {
+				rn.ProcessingStatus = *status
+			}
+			x.RecentNote = &rn
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func ticketCursorTime(c *TicketsPageCursor) any {
+	if c == nil {
+		return nil
+	}
+	return c.LastMentionedAt
+}
+func ticketCursorKey(c *TicketsPageCursor) string {
+	if c == nil {
+		return ""
+	}
+	return c.Key
+}
+
+func (s *Store) GetTicketWorkspaceProfile(ctx context.Context, userID int64, key string) (TicketProfile, error) {
+	var p TicketProfile
+	err := s.pool.QueryRow(ctx, `SELECT em.normalized_value,min(n.created_at),max(n.created_at),count(DISTINCT em.note_id)::int FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type='ticket' AND em.normalized_value=$2 GROUP BY em.normalized_value`, userID, key).Scan(&p.Key, &p.FirstMentionedAt, &p.LastMentionedAt, &p.MentionCount)
+	return p, err
+}
+func (s *Store) RecentNotesForTicket(ctx context.Context, userID int64, key string, limit int) ([]TicketRecentNote, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT n.id,n.created_at,n.summary,n.raw_text,n.processing_status FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type='ticket' AND em.normalized_value=$2 ORDER BY n.created_at DESC,n.id DESC LIMIT $3`, userID, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TicketRecentNote
+	for rows.Next() {
+		var x TicketRecentNote
+		if err := rows.Scan(&x.ID, &x.CreatedAt, &x.Summary, &x.RawText, &x.ProcessingStatus); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) PeopleForNotes(ctx context.Context, userID int64, noteIDs []int64, perNote int) (map[int64][]PersonRef, error) {
+	out := map[int64][]PersonRef{}
+	if len(noteIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT note_id,person_id,name FROM (SELECT pn.note_id,pn.person_id,p.name,row_number() OVER(PARTITION BY pn.note_id ORDER BY p.name,p.id) rn FROM people_notes pn JOIN people p ON p.id=pn.person_id AND p.user_id=pn.user_id WHERE pn.user_id=$1 AND pn.note_id=ANY($2)) x WHERE rn <= $3 ORDER BY note_id,rn`, userID, noteIDs, perNote)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var note int64
+		var pr PersonRef
+		if err := rows.Scan(&note, &pr.PersonID, &pr.Name); err != nil {
+			return nil, err
+		}
+		out[note] = append(out[note], pr)
+	}
+	return out, rows.Err()
+}
+func (s *Store) OpenActionsForTicket(ctx context.Context, userID int64, key string, limit int) ([]APIAction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT a.id,a.note_id,a.title,a.status,p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a JOIN entity_mentions em ON em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.status='open' ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIAction
+	for rows.Next() {
+		var a APIAction
+		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+func (s *Store) RecentDecisionsForTicket(ctx context.Context, userID int64, key string, limit int) ([]DecisionView, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT d.id,d.text,d.status,COALESCE(d.topic,'') FROM decisions d JOIN entity_mentions em ON em.user_id=d.user_id AND em.note_id=d.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 WHERE d.user_id=$1 ORDER BY d.id DESC LIMIT $3`, userID, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DecisionView
+	for rows.Next() {
+		var d DecisionView
+		if err := rows.Scan(&d.ID, &d.Text, &d.Status, &d.Topic); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

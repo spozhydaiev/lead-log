@@ -150,3 +150,37 @@ type PersonWorkspaceDetail struct {
 	RecentNotes     []PeopleRecentNote `json:"recent_notes"`
 	Page            NotesPage          `json:"page"`
 }
+
+type TicketRecentNote struct {
+	ID               string         `json:"id"`
+	CreatedAt        time.Time      `json:"created_at"`
+	Summary          *string        `json:"summary"`
+	RawTextPreview   string         `json:"raw_text_preview,omitempty"`
+	ProcessingStatus string         `json:"processing_status,omitempty"`
+	People           []LinkedPerson `json:"people,omitempty"`
+}
+type TicketListItem struct {
+	Key              string            `json:"key"`
+	FirstMentionedAt time.Time         `json:"first_mentioned_at"`
+	LastMentionedAt  time.Time         `json:"last_mentioned_at"`
+	MentionCount     int               `json:"mention_count"`
+	OpenActionCount  int               `json:"open_action_count"`
+	RecentNote       *TicketRecentNote `json:"recent_note"`
+}
+type TicketsList struct {
+	Items []TicketListItem `json:"items"`
+	Page  NotesPage        `json:"page"`
+}
+type TicketProfile struct {
+	Key              string    `json:"key"`
+	FirstMentionedAt time.Time `json:"first_mentioned_at"`
+	LastMentionedAt  time.Time `json:"last_mentioned_at"`
+	MentionCount     int       `json:"mention_count"`
+}
+type TicketWorkspaceDetail struct {
+	Ticket          TicketProfile      `json:"ticket"`
+	OpenActions     []Action           `json:"open_actions"`
+	RecentDecisions []Decision         `json:"recent_decisions"`
+	RecentNotes     []TicketRecentNote `json:"recent_notes"`
+	Page            NotesPage          `json:"page"`
+}

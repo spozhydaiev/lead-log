@@ -26,6 +26,8 @@ type fakeService struct {
 	registeredUser store.CurrentUser
 	people         services.PeopleListView
 	person         services.PersonWorkspaceView
+	tickets        services.TicketsListView
+	ticket         services.TicketWorkspaceView
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -111,6 +113,15 @@ func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (
 		return services.PersonWorkspaceView{}, pgx.ErrNoRows
 	}
 	return f.person, nil
+}
+func (f *fakeService) ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error) {
+	return f.tickets, nil
+}
+func (f *fakeService) GetTicketWorkspace(_ context.Context, _ int64, key string) (services.TicketWorkspaceView, error) {
+	if key == "MISS-404" {
+		return services.TicketWorkspaceView{}, pgx.ErrNoRows
+	}
+	return f.ticket, nil
 }
 
 type pinger struct {
@@ -374,5 +385,24 @@ func TestPeopleWorkspaceValidationAndLogging(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "Adlet") || strings.Contains(logs.String(), "query=x") || strings.Contains(logs.String(), "cursor=bad") {
 		t.Fatalf("private data leaked in logs: %s", logs.String())
+	}
+}
+
+func TestTicketsRoutesValidationAndNoStore(t *testing.T) {
+	svc := &fakeService{ticket: services.TicketWorkspaceView{Ticket: store.TicketProfile{Key: "CH-1234", FirstMentionedAt: time.Unix(1, 0), LastMentionedAt: time.Unix(2, 0), MentionCount: 1}}}
+	h := New(svc, &pinger{}, Config{Now: time.Now}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if w := request(h, "GET", "/api/v1/tickets/ch-1234", "", "top-secret-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"key":"CH-1234"`) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal(w.Code, w.Body.String(), w.Header().Get("Cache-Control"))
+	}
+	for _, path := range []string{"/api/v1/tickets/bad", "/api/v1/tickets/å-123", "/api/v1/tickets/CH-1234%27"} {
+		if w := request(h, "GET", path, "", "top-secret-token"); w.Code != 400 {
+			t.Fatalf("%s got %d", path, w.Code)
+		}
+	}
+	if w := request(h, "GET", "/api/v1/tickets?query=x", "", "top-secret-token"); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/v1/tickets?cursor=bad", "", "top-secret-token"); w.Code != 400 {
+		t.Fatal(w.Code)
 	}
 }
