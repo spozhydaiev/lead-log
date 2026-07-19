@@ -24,6 +24,8 @@ type fakeService struct {
 	actions        []store.APIAction
 	created        bool
 	registeredUser store.CurrentUser
+	people         services.PeopleListView
+	person         services.PersonWorkspaceView
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -100,6 +102,15 @@ func (f *fakeService) GetToday(context.Context, int64, time.Time) (services.Toda
 }
 func (f *fakeService) GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error) {
 	return services.NoteDetailView{}, pgx.ErrNoRows
+}
+func (f *fakeService) ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error) {
+	return f.people, nil
+}
+func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (services.PersonWorkspaceView, error) {
+	if id == 404 {
+		return services.PersonWorkspaceView{}, pgx.ErrNoRows
+	}
+	return f.person, nil
 }
 
 type pinger struct {
@@ -313,5 +324,55 @@ func TestCORSPreflightAndUnknownOrigin(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != 403 || w.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatal(w.Code, w.Header())
+	}
+}
+
+func TestPeopleWorkspaceRoutes(t *testing.T) {
+	summary := "Discussed retry ownership."
+	long := strings.Repeat("🙂", 450)
+	now := time.Date(2026, 7, 18, 13, 42, 0, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, people: services.PeopleListView{Items: []store.PeopleListItem{{PersonID: 12, Name: "Adlet", Aliases: []string{"Адлет", "adlet", "Адлет"}, LastMentionedAt: now, MentionCount: 14, OpenActionCount: 2, RecentNote: &store.PeopleRecentNote{ID: 184, CreatedAt: now, Summary: &summary, RawText: long, ProcessingStatus: "processed"}}}}, person: services.PersonWorkspaceView{Person: store.PersonProfile{PersonID: 12, Name: "Adlet", Aliases: []string{"Адлет"}, FirstMentionedAt: now.AddDate(0, -1, 0), LastMentionedAt: now, MentionCount: 14}, OpenActions: []store.APIAction{{ID: 31, Title: "Follow up", Status: "open", CreatedAt: now}}, RecentDecisions: []store.DecisionView{{ID: 7, Text: "Use retry policy", Status: "active", Topic: "architecture"}}, RecentNotes: []store.PeopleRecentNote{{ID: 184, CreatedAt: now, Summary: &summary, RawText: long, ProcessingStatus: "processed"}}}}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "GET", "/api/v1/people?limit=20&query=Adlet&has_open_actions=true", "", "top-secret-token")
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"items"`, `"id":"person_12"`, `"display_name":"Adlet"`, `"aliases":["Адлет","adlet"]`, `"open_action_count":2`, `"recent_note"`, `"has_more":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+	if strings.Contains(body, "🙂") {
+		t.Fatalf("list leaked raw note: %s", body)
+	}
+	w = request(h, "GET", "/api/v1/people/person_12", "", "top-secret-token")
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d headers=%v body=%s", w.Code, w.Header(), w.Body.String())
+	}
+	body = w.Body.String()
+	for _, want := range []string{`"person"`, `"open_actions"`, `"recent_decisions"`, `"recent_notes"`, `"id":"action_31"`, `"id":"decision_7"`, `"id":"note_184"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+	if strings.Count(body, "🙂") > 400 || !utf8.ValidString(body) {
+		t.Fatalf("detail preview invalid: %s", body)
+	}
+}
+
+func TestPeopleWorkspaceValidationAndLogging(t *testing.T) {
+	var logs bytes.Buffer
+	h := testAPI(t, &pinger{}, &logs)
+	for _, path := range []string{"/api/v1/people?limit=0", "/api/v1/people?limit=51", "/api/v1/people?query=x", "/api/v1/people?has_open_actions=yes", "/api/v1/people?cursor=bad", "/api/v1/people/bad_1"} {
+		if w := request(h, "GET", path, "", "top-secret-token"); w.Code != 400 {
+			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+	}
+	if w := request(h, "GET", "/api/v1/people/person_404", "", "top-secret-token"); w.Code != 404 {
+		t.Fatalf("detail status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(logs.String(), "Adlet") || strings.Contains(logs.String(), "query=x") || strings.Contains(logs.String(), "cursor=bad") {
+		t.Fatalf("private data leaked in logs: %s", logs.String())
 	}
 }

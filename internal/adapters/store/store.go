@@ -110,6 +110,47 @@ type DailyCache struct {
 	ResponseJSON string
 	CreatedAt    time.Time
 }
+
+// PeopleListFilter constrains the People workspace list query.
+type PeopleListFilter struct {
+	Query          string
+	HasOpenActions bool
+}
+
+type PeoplePageCursor struct {
+	LastMentionedAt time.Time
+	PersonID        int64
+}
+
+type PeopleListItem struct {
+	PersonID         int64
+	Name             string
+	Aliases          []string
+	FirstMentionedAt time.Time
+	LastMentionedAt  time.Time
+	MentionCount     int
+	OpenActionCount  int
+	RecentNote       *PeopleRecentNote
+}
+
+type PeopleRecentNote struct {
+	ID               int64
+	CreatedAt        time.Time
+	Summary          *string
+	RawText          string
+	ProcessingStatus string
+	Tickets          []string
+}
+
+type PersonProfile struct {
+	PersonID         int64
+	Name             string
+	Aliases          []string
+	FirstMentionedAt time.Time
+	LastMentionedAt  time.Time
+	MentionCount     int
+}
+
 type PageCursor struct {
 	CreatedAt time.Time
 	ID        int64
@@ -1370,4 +1411,142 @@ func (s *Store) CleanupAuth(ctx context.Context, now time.Time, limit int) (int6
 	}
 	tag2, err := s.pool.Exec(ctx, `DELETE FROM telegram_link_tokens WHERE id IN (SELECT id FROM telegram_link_tokens WHERE expires_at<$1 OR used_at IS NOT NULL ORDER BY id LIMIT $2)`, now, limit)
 	return tag.RowsAffected() + tag2.RowsAffected(), err
+}
+
+func (s *Store) ListPeopleWorkspace(ctx context.Context, userID int64, f PeopleListFilter, limit int, cursor *PeoplePageCursor) ([]PeopleListItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH base AS (
+			SELECT p.id, p.name, min(pn.created_at) AS first_mentioned_at, max(pn.created_at) AS last_mentioned_at, count(*)::int AS mention_count
+			FROM people p
+			JOIN people_notes pn ON pn.person_id=p.id AND pn.user_id=p.user_id
+			WHERE p.user_id=$1
+			  AND ($2::text = '' OR p.name ILIKE '%' || $2 || '%' OR EXISTS (SELECT 1 FROM person_aliases pa WHERE pa.user_id=p.user_id AND pa.person_id=p.id AND pa.alias ILIKE '%' || $2 || '%'))
+			  AND ($3::bool = false OR EXISTS (SELECT 1 FROM actions a WHERE a.user_id=p.user_id AND a.linked_person_id=p.id AND a.status='open'))
+			GROUP BY p.id, p.name
+		), page AS (
+			SELECT * FROM base
+			WHERE ($4::timestamptz IS NULL OR (last_mentioned_at,id)<($4,$5))
+			ORDER BY last_mentioned_at DESC,id DESC
+			LIMIT $6
+		), aliases AS (
+			SELECT person_id, array_agg(alias ORDER BY alias) AS aliases
+			FROM (SELECT DISTINCT ON (pa.person_id, pa.normalized_alias) pa.person_id, pa.alias FROM person_aliases pa JOIN page pg ON pg.id=pa.person_id WHERE pa.user_id=$1 AND lower(pa.alias) <> lower(pg.name) ORDER BY pa.person_id, pa.normalized_alias, pa.alias LIMIT 1000) x
+			GROUP BY person_id
+		), open_actions AS (
+			SELECT linked_person_id AS person_id, count(*)::int AS cnt FROM actions a JOIN page pg ON pg.id=a.linked_person_id WHERE a.user_id=$1 AND a.status='open' GROUP BY linked_person_id
+		), recent AS (
+			SELECT DISTINCT ON (pn.person_id) pn.person_id,n.id,n.created_at,n.summary,n.raw_text,n.processing_status
+			FROM people_notes pn JOIN page pg ON pg.id=pn.person_id JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id
+			WHERE pn.user_id=$1 ORDER BY pn.person_id,n.created_at DESC,n.id DESC
+		)
+		SELECT pg.id,pg.name,COALESCE(al.aliases,'{}'),pg.first_mentioned_at,pg.last_mentioned_at,pg.mention_count,COALESCE(oa.cnt,0),r.id,r.created_at,r.summary,r.raw_text,r.processing_status
+		FROM page pg LEFT JOIN aliases al ON al.person_id=pg.id LEFT JOIN open_actions oa ON oa.person_id=pg.id LEFT JOIN recent r ON r.person_id=pg.id
+		ORDER BY pg.last_mentioned_at DESC,pg.id DESC`, userID, f.Query, f.HasOpenActions, peopleCursorTime(cursor), peopleCursorID(cursor), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PeopleListItem
+	for rows.Next() {
+		var x PeopleListItem
+		var rn PeopleRecentNote
+		var nid *int64
+		var ncreated *time.Time
+		var summary *string
+		var raw *string
+		var status *string
+		if err := rows.Scan(&x.PersonID, &x.Name, &x.Aliases, &x.FirstMentionedAt, &x.LastMentionedAt, &x.MentionCount, &x.OpenActionCount, &nid, &ncreated, &summary, &raw, &status); err != nil {
+			return nil, err
+		}
+		if nid != nil && ncreated != nil {
+			rn.ID = *nid
+			rn.CreatedAt = *ncreated
+			rn.Summary = summary
+			if raw != nil {
+				rn.RawText = *raw
+			}
+			if status != nil {
+				rn.ProcessingStatus = *status
+			}
+			x.RecentNote = &rn
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func peopleCursorTime(c *PeoplePageCursor) any {
+	if c == nil {
+		return nil
+	}
+	return c.LastMentionedAt
+}
+func peopleCursorID(c *PeoplePageCursor) int64 {
+	if c == nil {
+		return 0
+	}
+	return c.PersonID
+}
+
+func (s *Store) GetPersonWorkspaceProfile(ctx context.Context, userID, personID int64, aliasLimit int) (PersonProfile, error) {
+	var p PersonProfile
+	err := s.pool.QueryRow(ctx, `SELECT p.id,p.name,min(pn.created_at),max(pn.created_at),count(*)::int FROM people p JOIN people_notes pn ON pn.person_id=p.id AND pn.user_id=p.user_id WHERE p.user_id=$1 AND p.id=$2 GROUP BY p.id,p.name`, userID, personID).Scan(&p.PersonID, &p.Name, &p.FirstMentionedAt, &p.LastMentionedAt, &p.MentionCount)
+	if err != nil {
+		return p, err
+	}
+	p.Aliases, err = s.ListPersonAliases(ctx, userID, personID, aliasLimit+1)
+	if err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func (s *Store) RecentNotesForPerson(ctx context.Context, userID, personID int64, limit int) ([]PeopleRecentNote, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id,created_at,summary,raw_text,processing_status FROM (SELECT n.id,n.created_at,n.summary,n.raw_text,n.processing_status,row_number() OVER (PARTITION BY n.id ORDER BY pn.created_at DESC,pn.id DESC) rn FROM people_notes pn JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id WHERE pn.user_id=$1 AND pn.person_id=$2) x WHERE rn=1 ORDER BY created_at DESC,id DESC LIMIT $3`, userID, personID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PeopleRecentNote
+	for rows.Next() {
+		var x PeopleRecentNote
+		if err := rows.Scan(&x.ID, &x.CreatedAt, &x.Summary, &x.RawText, &x.ProcessingStatus); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) OpenActionsForPerson(ctx context.Context, userID, personID int64, limit int) ([]APIAction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT a.id,a.note_id,a.title,a.status,p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.linked_person_id=$2 AND a.status='open' ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, personID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIAction
+	for rows.Next() {
+		var a APIAction
+		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RecentDecisionsForPerson(ctx context.Context, userID, personID int64, limit int) ([]DecisionView, error) {
+	rows, err := s.pool.Query(ctx, `SELECT d.id,d.text,d.status,COALESCE(d.topic,'') FROM decisions d JOIN notes n ON n.id=d.note_id AND n.user_id=d.user_id WHERE d.user_id=$1 AND d.linked_person_id=$2 ORDER BY d.decided_at DESC,d.id DESC LIMIT $3`, userID, personID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DecisionView
+	for rows.Next() {
+		var x DecisionView
+		if err := rows.Scan(&x.ID, &x.Text, &x.Status, &x.Topic); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }

@@ -113,3 +113,40 @@ type NotesHistory struct {
 	Items []TodayNote `json:"items"`
 	Page  NotesPage   `json:"page"`
 }
+
+type PeopleRecentNote struct {
+	ID               string    `json:"id"`
+	CreatedAt        time.Time `json:"created_at"`
+	Summary          *string   `json:"summary"`
+	RawTextPreview   string    `json:"raw_text_preview,omitempty"`
+	ProcessingStatus string    `json:"processing_status,omitempty"`
+	Tickets          []string  `json:"tickets,omitempty"`
+}
+type PeopleListItem struct {
+	ID              string            `json:"id"`
+	DisplayName     string            `json:"display_name"`
+	Aliases         []string          `json:"aliases"`
+	LastMentionedAt time.Time         `json:"last_mentioned_at"`
+	MentionCount    int               `json:"mention_count"`
+	OpenActionCount int               `json:"open_action_count"`
+	RecentNote      *PeopleRecentNote `json:"recent_note"`
+}
+type PeopleList struct {
+	Items []PeopleListItem `json:"items"`
+	Page  NotesPage        `json:"page"`
+}
+type PersonProfile struct {
+	ID               string    `json:"id"`
+	DisplayName      string    `json:"display_name"`
+	Aliases          []string  `json:"aliases"`
+	FirstMentionedAt time.Time `json:"first_mentioned_at"`
+	LastMentionedAt  time.Time `json:"last_mentioned_at"`
+	MentionCount     int       `json:"mention_count"`
+}
+type PersonWorkspaceDetail struct {
+	Person          PersonProfile      `json:"person"`
+	OpenActions     []Action           `json:"open_actions"`
+	RecentDecisions []Decision         `json:"recent_decisions"`
+	RecentNotes     []PeopleRecentNote `json:"recent_notes"`
+	Page            NotesPage          `json:"page"`
+}
