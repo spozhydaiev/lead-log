@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/httpapi/dto"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/apperrors"
 	"github.com/spozhydaiev/lead-log/internal/services"
 )
 
@@ -800,6 +801,16 @@ func validation(w http.ResponseWriter, r *http.Request) {
 func validationFields(w http.ResponseWriter, r *http.Request, fields map[string]string) {
 	writeErrorWithFields(w, r, 400, "validation_error", "The request is invalid.", fields)
 }
+func (a *API) internal(w http.ResponseWriter, r *http.Request, operation string, err error, start time.Time) {
+	class, failing := apperrors.Classify(err)
+	attrs := []any{"component", "http_api", "operation", operation, "operation_id", requestID(r), "route", route(r), "result", "failure", "error_class", class, "failing_operation", failing, "error", err.Error()}
+	if !start.IsZero() {
+		attrs = append(attrs, "duration_ms", time.Since(start).Milliseconds())
+	}
+	a.logger.Error("HTTP internal error", attrs...)
+	writeError(w, r, 500, "internal_error", "An internal error occurred.")
+}
+
 func internal(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, 500, "internal_error", "An internal error occurred.")
 }
@@ -1002,6 +1013,7 @@ func (a *API) tickets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"data": out})
 }
 func (a *API) ticketDetail(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	p, _ := principal(r)
 	key, ok := services.NormalizeWorkspaceTicketKey(r.PathValue("key"))
 	if !ok {
@@ -1014,7 +1026,7 @@ func (a *API) ticketDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		internal(w, r)
+		a.internal(w, r, "tickets.detail", err, start)
 		return
 	}
 	out := dto.TicketWorkspaceDetail{Ticket: dto.TicketProfile{Key: v.Ticket.Key, FirstMentionedAt: v.Ticket.FirstMentionedAt, LastMentionedAt: v.Ticket.LastMentionedAt, MentionCount: v.Ticket.MentionCount}, OpenActions: []dto.Action{}, RecentDecisions: []dto.Decision{}, RecentNotes: []dto.TicketRecentNote{}, Page: dto.NotesPage{NextCursor: nil, HasMore: false}}

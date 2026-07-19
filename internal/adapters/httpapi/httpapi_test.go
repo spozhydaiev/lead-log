@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/apperrors"
 	"github.com/spozhydaiev/lead-log/internal/services"
 )
 
@@ -28,6 +29,7 @@ type fakeService struct {
 	person         services.PersonWorkspaceView
 	tickets        services.TicketsListView
 	ticket         services.TicketWorkspaceView
+	ticketErr      error
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -120,6 +122,9 @@ func (f *fakeService) ListTickets(context.Context, int64, services.TicketsListFi
 func (f *fakeService) GetTicketWorkspace(_ context.Context, _ int64, key string) (services.TicketWorkspaceView, error) {
 	if key == "MISS-404" {
 		return services.TicketWorkspaceView{}, pgx.ErrNoRows
+	}
+	if f.ticketErr != nil {
+		return services.TicketWorkspaceView{}, f.ticketErr
 	}
 	return f.ticket, nil
 }
@@ -404,5 +409,70 @@ func TestTicketsRoutesValidationAndNoStore(t *testing.T) {
 	}
 	if w := request(h, "GET", "/api/v1/tickets?cursor=bad", "", "top-secret-token"); w.Code != 400 {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestTicketDetailUnexpectedErrorLogsSanitizedDiagnosticOnce(t *testing.T) {
+	var logs bytes.Buffer
+	internalErr := apperrors.Wrap("ticket_repository.list_recent_notes", apperrors.ClassDatabaseScan, errors.New("scan recent ticket note: sql: Scan error on private value"))
+	svc := &fakeService{ticketErr: internalErr}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session", Now: time.Now}, slog.New(slog.NewTextHandler(&logs, nil)))
+	w := request(h, "GET", "/api/v1/tickets/secret-123", "", "top-secret-token")
+	if w.Code != 500 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"code":"internal_error"`) || !strings.Contains(body, `"message":"An internal error occurred."`) {
+		t.Fatalf("unsafe or missing client error: %s", body)
+	}
+	if strings.Contains(body, "Scan error") || strings.Contains(body, "ticket_repository") || strings.Contains(body, "secret-123") {
+		t.Fatalf("internal error leaked to client: %s", body)
+	}
+	out := logs.String()
+	if strings.Count(out, "level=ERROR") != 1 {
+		t.Fatalf("expected one error log, got logs:\n%s", out)
+	}
+	for _, want := range []string{"operation=tickets.detail", "route=/api/v1/tickets/{key}", "error_class=database_scan", "failing_operation=ticket_repository.list_recent_notes", "scan recent ticket note", "level=INFO", "operation=request", "status=500"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in logs:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "secret-123") || strings.Contains(out, "user_id") || strings.Contains(out, "top-secret-token") {
+		t.Fatalf("private data leaked in logs: %s", out)
+	}
+	if got := w.Header().Get("X-Request-ID"); got == "" || !strings.Contains(out, "operation_id="+got) {
+		t.Fatalf("operation id not shared, header=%q logs=%s", got, out)
+	}
+}
+
+func TestTicketDetailExpectedErrorsAreNotUnexpectedErrorLogs(t *testing.T) {
+	var logs bytes.Buffer
+	svc := &fakeService{}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session", Now: time.Now}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if w := request(h, "GET", "/api/v1/tickets/bad", "", "top-secret-token"); w.Code != 400 {
+		t.Fatalf("400 status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(h, "GET", "/api/v1/tickets/MISS-404", "", "top-secret-token"); w.Code != 404 {
+		t.Fatalf("404 status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("expected errors logged as unexpected: %s", logs.String())
+	}
+}
+
+func TestTicketReturnedByListCanBeOpenedByDetail(t *testing.T) {
+	now := time.Unix(2, 0)
+	svc := &fakeService{
+		tickets: services.TicketsListView{Items: []store.TicketListItem{{Key: "CH-1234", FirstMentionedAt: time.Unix(1, 0), LastMentionedAt: now, MentionCount: 1}}},
+		ticket:  services.TicketWorkspaceView{Ticket: store.TicketProfile{Key: "CH-1234", FirstMentionedAt: time.Unix(1, 0), LastMentionedAt: now, MentionCount: 1}, OpenActions: []store.APIAction{}, RecentDecisions: []store.DecisionView{}, RecentNotes: []store.TicketRecentNote{}},
+	}
+	h := New(svc, &pinger{}, Config{SessionCookieName: "lead_log_session", Now: time.Now}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	list := request(h, "GET", "/api/v1/tickets", "", "top-secret-token")
+	if list.Code != 200 || !strings.Contains(list.Body.String(), `"key":"CH-1234"`) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	detail := request(h, "GET", "/api/v1/tickets/CH-1234", "", "top-secret-token")
+	if detail.Code != 200 || !strings.Contains(detail.Body.String(), `"key":"CH-1234"`) || !strings.Contains(detail.Body.String(), `"open_actions":[]`) {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
 	}
 }
