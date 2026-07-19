@@ -19,14 +19,32 @@ import (
 )
 
 type fakeService struct {
-	user    store.WebUser
-	notes   []store.APINote
-	actions []store.APIAction
-	created bool
+	user           store.WebUser
+	notes          []store.APINote
+	actions        []store.APIAction
+	created        bool
+	registeredUser store.CurrentUser
 }
 
-func (f *fakeService) Register(context.Context, services.RegisterInput, services.AuthConfig) (services.AuthSession, error) {
-	return services.AuthSession{}, nil
+func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
+	if in.ResponseLanguage == "bad" {
+		return services.AuthSession{}, services.ValidationError{Fields: map[string]string{"response_language": "Choose a supported response language."}}
+	}
+	if len([]rune(in.DisplayName)) > services.MaxDisplayNameLength {
+		return services.AuthSession{}, services.ValidationError{Fields: map[string]string{"display_name": "Display name is too long."}}
+	}
+	dn := strings.TrimSpace(in.DisplayName)
+	email := strings.TrimSpace(in.Email)
+	tz := in.Timezone
+	if tz == "" {
+		tz = "Europe/Warsaw"
+	}
+	lang := in.ResponseLanguage
+	if lang == "" {
+		lang = "en"
+	}
+	f.registeredUser = store.CurrentUser{ID: 7, Email: &email, DisplayName: &dn, Timezone: tz, ResponseLanguage: lang}
+	return services.AuthSession{User: f.registeredUser, Token: "top-secret-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 func (f *fakeService) Login(context.Context, services.LoginInput, services.AuthConfig) (services.AuthSession, error) {
 	return services.AuthSession{}, nil
@@ -35,10 +53,16 @@ func (f *fakeService) SessionByToken(_ context.Context, token string, _ time.Tim
 	if token != "top-secret-token" {
 		return store.CurrentUser{}, pgx.ErrNoRows
 	}
+	if f.registeredUser.ID != 0 {
+		return f.registeredUser, nil
+	}
 	return store.CurrentUser{ID: f.user.ID, Timezone: "UTC", ResponseLanguage: "en"}, nil
 }
 func (f *fakeService) RevokeSession(context.Context, string) error { return nil }
 func (f *fakeService) CurrentUser(context.Context, int64) (store.CurrentUser, error) {
+	if f.registeredUser.ID != 0 {
+		return f.registeredUser, nil
+	}
 	return store.CurrentUser{ID: f.user.ID, Timezone: "UTC", ResponseLanguage: "en"}, nil
 }
 func (f *fakeService) TelegramStatus(context.Context, int64) (store.TelegramStatus, error) {
@@ -119,6 +143,67 @@ func request(h http.Handler, method, path, body, token string) *httptest.Respons
 	h.ServeHTTP(w, r)
 	return w
 }
+
+func TestRegisterContract(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"minimal registration", `{"email":"user@example.com","password":"Twelvesymbolspassword!11"}`, []string{`"timezone":"Europe/Warsaw"`, `"response_language":"en"`}},
+		{"display_name only", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","display_name":"Sergio"}`, []string{`"display_name":"Sergio"`}},
+		{"timezone only", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","timezone":"Europe/Warsaw"}`, []string{`"timezone":"Europe/Warsaw"`}},
+		{"response_language only", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","response_language":"en"}`, []string{`"response_language":"en"`}},
+		{"all optional fields", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","display_name":"Sergio","timezone":"Europe/Warsaw","response_language":"en"}`, []string{`"display_name":"Sergio"`, `"timezone":"Europe/Warsaw"`, `"response_language":"en"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{user: store.WebUser{ID: 7}}
+			h := New(svc, &pinger{}, Config{AllowedOrigins: []string{"http://localhost:3000"}, SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			w := request(h, "POST", "/api/v1/auth/register", tc.body, "")
+			if w.Code != 201 {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			body := w.Body.String()
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Fatalf("missing %s in %s", want, body)
+				}
+			}
+			if strings.Contains(body, "Twelvesymbolspassword") || strings.Contains(body, "password") {
+				t.Fatalf("password leaked in response: %s", body)
+			}
+			sw := request(h, "GET", "/api/v1/auth/session", "", "top-secret-token")
+			if sw.Code != 200 {
+				t.Fatalf("session status=%d body=%s", sw.Code, sw.Body.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(sw.Body.String(), want) {
+					t.Fatalf("session missing %s in %s", want, sw.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRegisterValidationContract(t *testing.T) {
+	var logs bytes.Buffer
+	h := testAPI(t, &pinger{}, &logs)
+	if w := request(h, "POST", "/api/v1/auth/register", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","unexpected":true}`, ""); w.Code != 400 {
+		t.Fatalf("unknown field status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := request(h, "POST", "/api/v1/auth/register", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","response_language":"bad"}`, ""); w.Code != 400 || !strings.Contains(w.Body.String(), `"response_language"`) || strings.Contains(w.Body.String(), "Twelvesymbolspassword") {
+		t.Fatalf("invalid language response: status=%d body=%s", w.Code, w.Body.String())
+	}
+	longName := strings.Repeat("a", services.MaxDisplayNameLength+1)
+	if w := request(h, "POST", "/api/v1/auth/register", `{"email":"user@example.com","password":"Twelvesymbolspassword!11","display_name":"`+longName+`"}`, ""); w.Code != 400 || !strings.Contains(w.Body.String(), `"display_name"`) || strings.Contains(w.Body.String(), "Twelvesymbolspassword") {
+		t.Fatalf("long display response: status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(logs.String(), "Twelvesymbolspassword") || strings.Contains(logs.String(), "password") {
+		t.Fatalf("password leaked in logs: %s", logs.String())
+	}
+}
+
 func TestHealthAndReadiness(t *testing.T) {
 	p := &pinger{}
 	h := testAPI(t, p, io.Discard)

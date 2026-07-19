@@ -22,11 +22,26 @@ var ErrDuplicateEmail = errors.New("duplicate email")
 var ErrInvalidCredentials = errors.New("invalid credentials")
 var ErrTelegramConflict = errors.New("telegram account conflict")
 
+const MaxDisplayNameLength = 100
+
 type AuthConfig struct {
 	SessionTTL        time.Duration
 	PasswordMinLength int
 }
-type RegisterInput struct{ Email, Password, DisplayName, Timezone, ResponseLanguage string }
+type RegisterInput struct {
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	DisplayName      string `json:"display_name,omitempty"`
+	Timezone         string `json:"timezone,omitempty"`
+	ResponseLanguage string `json:"response_language,omitempty"`
+}
+
+type ValidationError struct {
+	Fields map[string]string
+}
+
+func (e ValidationError) Error() string { return "validation error" }
+
 type LoginInput struct{ Email, Password string }
 type AuthSession struct {
 	User      store.CurrentUser
@@ -63,7 +78,7 @@ func validateTZ(tz string) string {
 	}
 	return tz
 }
-func validateLang(l string) string {
+func ValidateResponseLanguage(l string) string {
 	l = strings.TrimSpace(l)
 	if l == "" {
 		return "en"
@@ -77,16 +92,27 @@ func validateLang(l string) string {
 func (s *Service) Register(ctx context.Context, in RegisterInput, cfg AuthConfig) (AuthSession, error) {
 	_, _ = s.store.CleanupAuth(ctx, time.Now(), 100)
 	email, norm, err := NormalizeEmail(in.Email)
+	fields := map[string]string{}
 	if err != nil {
-		return AuthSession{}, err
+		fields["email"] = "Enter a valid email address."
 	}
 	if err := ValidatePassword(in.Password, cfg.PasswordMinLength); err != nil {
-		return AuthSession{}, err
+		fields["password"] = "Password must be 12 to 128 characters."
+	}
+	displayName := strings.TrimSpace(in.DisplayName)
+	if len([]rune(displayName)) > MaxDisplayNameLength {
+		fields["display_name"] = "Display name is too long."
 	}
 	tz := validateTZ(in.Timezone)
-	lang := validateLang(in.ResponseLanguage)
-	if tz == "" || lang == "" {
-		return AuthSession{}, fmt.Errorf("invalid profile")
+	if tz == "" {
+		fields["timezone"] = "Enter a valid IANA timezone."
+	}
+	lang := ValidateResponseLanguage(in.ResponseLanguage)
+	if lang == "" {
+		fields["response_language"] = "Choose a supported response language."
+	}
+	if len(fields) > 0 {
+		return AuthSession{}, ValidationError{Fields: fields}
 	}
 	h, err := hashPassword(in.Password)
 	if err != nil {
@@ -97,7 +123,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, cfg AuthConfig
 		return AuthSession{}, err
 	}
 	exp := time.Now().Add(ttl(cfg.SessionTTL))
-	u, err := s.store.CreateUserWithIdentityAndSession(ctx, email, norm, h, strings.TrimSpace(in.DisplayName), tz, lang, th, exp)
+	u, err := s.store.CreateUserWithIdentityAndSession(ctx, email, norm, h, displayName, tz, lang, th, exp)
 	if isUnique(err) {
 		return AuthSession{}, ErrDuplicateEmail
 	}
