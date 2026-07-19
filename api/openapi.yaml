@@ -104,6 +104,27 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/people:
+    get:
+      description: People workspace list. Returns current-user people with at least one structured people_notes mention, ordered by last_mentioned_at DESC and public person id DESC. Cursor pagination is opaque and offset-free; invalid or mismatched cursors return 400. Search trims whitespace to 2-100 Unicode characters and matches display name or persisted aliases case-insensitively. Optional has_open_actions=true uses persisted linked actions only. Responses include Cache-Control no-store and never run an LLM.
+      parameters:
+        - {name: limit, in: query, description: Page size. Defaults to 20; values outside 1..50 are rejected., schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
+        - {name: cursor, in: query, description: Opaque next_cursor from a prior response for the same filters., schema: {type: string}}
+        - {name: query, in: query, description: Case-insensitive display-name or alias search; trimmed, min 2 and max 100 Unicode characters., schema: {type: string, minLength: 2, maxLength: 100}}
+        - {name: has_open_actions, in: query, description: When true, include only people with persisted open linked actions. False or omitted does not filter., schema: {type: boolean}}
+      responses:
+        '200': {description: Stable newest-mentioned people page, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {$ref: '#/components/schemas/PeopleListEnvelope'}, examples: {populated: {value: {data: {items: [{id: person_12, display_name: Adlet, aliases: [Адлет], last_mentioned_at: '2026-07-18T13:42:00Z', mention_count: 14, open_action_count: 2, recent_note: {id: note_184, created_at: '2026-07-18T13:42:00Z', summary: Discussed retry policy and ownership.}}], page: {next_cursor: null, has_more: false}}}}, empty: {value: {data: {items: [], page: {next_cursor: null, has_more: false}}}}, search: {summary: Use /api/v1/people?query=Adlet}, pagination: {summary: Use /api/v1/people?cursor=<next_cursor>}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/people/{id}:
+    get:
+      description: First-screen person workspace detail for a current-user public person id. Returns persisted profile, up to 20 open actions, up to 10 recent decisions, and up to 20 recent notes; never infers from raw text and never runs an LLM. Foreign or missing people return 404.
+      parameters: [{name: id, in: path, required: true, schema: {type: string, pattern: '^person_[1-9][0-9]*$'}}]
+      responses:
+        '200': {description: Owner-scoped person detail, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {$ref: '#/components/schemas/PersonWorkspaceEnvelope'}, examples: {populated: {value: {data: {person: {id: person_12, display_name: Adlet, aliases: [Адлет], first_mentioned_at: '2026-03-12T10:00:00Z', last_mentioned_at: '2026-07-18T13:42:00Z', mention_count: 14}, open_actions: [], recent_decisions: [], recent_notes: [], page: {next_cursor: null, has_more: false}}}}, no_open_actions: {value: {data: {person: {id: person_12, display_name: Adlet, aliases: [], first_mentioned_at: '2026-03-12T10:00:00Z', last_mentioned_at: '2026-07-18T13:42:00Z', mention_count: 1}, open_actions: [], recent_decisions: [], recent_notes: [], page: {next_cursor: null, has_more: false}}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/actions:
     get:
       parameters:
@@ -154,6 +175,13 @@ components:
     NotesHistory: {type: object, required: [items, page], properties: {items: {type: array, items: {$ref: '#/components/schemas/TodayNote'}}, page: {$ref: '#/components/schemas/NotesPage'}}}
     NotesHistoryEnvelope: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/NotesHistory'}}}
     Person: {type: object, required: [display_name], properties: {display_name: {type: string}}}
+    PeopleListEnvelope: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/PeopleList'}}}
+    PeopleList: {type: object, required: [items, page], properties: {items: {type: array, items: {$ref: '#/components/schemas/PeopleListItem'}}, page: {$ref: '#/components/schemas/NotesPage'}}}
+    PeopleListItem: {type: object, required: [id, display_name, aliases, last_mentioned_at, mention_count, open_action_count, recent_note], properties: {id: {type: string, example: person_12}, display_name: {type: string}, aliases: {type: array, maxItems: 10, items: {type: string}}, last_mentioned_at: {type: string, format: date-time}, mention_count: {type: integer}, open_action_count: {type: integer}, recent_note: {oneOf: [{$ref: '#/components/schemas/PeopleRecentNote'}, {type: 'null'}]}}}
+    PeopleRecentNote: {type: object, required: [id, created_at, summary], properties: {id: {type: string, example: note_184}, created_at: {type: string, format: date-time}, summary: {type: [string, 'null']}, raw_text_preview: {type: string, maxLength: 400}, processing_status: {$ref: '#/components/schemas/ProcessingStatus'}, tickets: {type: array, maxItems: 3, items: {type: string}}}}
+    PersonWorkspaceEnvelope: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/PersonWorkspaceDetail'}}}
+    PersonProfile: {type: object, required: [id, display_name, aliases, first_mentioned_at, last_mentioned_at, mention_count], properties: {id: {type: string, example: person_12}, display_name: {type: string}, aliases: {type: array, maxItems: 10, items: {type: string}}, first_mentioned_at: {type: string, format: date-time}, last_mentioned_at: {type: string, format: date-time}, mention_count: {type: integer}}}
+    PersonWorkspaceDetail: {type: object, required: [person, open_actions, recent_decisions, recent_notes, page], properties: {person: {$ref: '#/components/schemas/PersonProfile'}, open_actions: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/Action'}}, recent_decisions: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/Decision'}}, recent_notes: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/PeopleRecentNote'}}, page: {$ref: '#/components/schemas/NotesPage'}}}
     Action: {type: object, required: [id, title, status, created_at], properties: {id: {type: string, example: action_31}, title: {type: string}, status: {enum: [open, done]}, linked_person: {oneOf: [{$ref: '#/components/schemas/Person'}, {type: 'null'}]}, due_at: {type: [string, 'null'], format: date-time}, created_at: {type: string, format: date-time}, completed_at: {type: [string, 'null'], format: date-time}, source_note_id: {type: [string, 'null']}}}
     ActionList: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Action'}}, pagination: {$ref: '#/components/schemas/Pagination'}}}
     ProcessingStatus: {type: string, enum: [pending, processing, processed, failed]}

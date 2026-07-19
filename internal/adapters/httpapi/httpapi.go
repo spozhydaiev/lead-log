@@ -54,6 +54,8 @@ type Service interface {
 	SetActionStatus(context.Context, int64, int64, string) (store.APIAction, error)
 	GetToday(context.Context, int64, time.Time) (services.TodayView, error)
 	GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error)
+	ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error)
+	GetPersonWorkspace(context.Context, int64, int64) (services.PersonWorkspaceView, error)
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
@@ -104,6 +106,8 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/notes/{id}", a.auth(http.HandlerFunc(a.noteDetail)))
 	mux.Handle("GET /api/v1/today", a.auth(http.HandlerFunc(a.today)))
 	mux.Handle("POST /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
+	mux.Handle("GET /api/v1/people", a.auth(http.HandlerFunc(a.people)))
+	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
 	mux.Handle("PATCH /api/v1/actions/{id}", a.auth(http.HandlerFunc(a.patchAction)))
 	return a.middleware(mux)
@@ -810,4 +814,154 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+type peopleCursor struct {
+	LastMentionedAt time.Time `json:"last_mentioned_at"`
+	PersonID        int64     `json:"person_id"`
+	FilterHash      string    `json:"filter_hash"`
+	Version         int       `json:"v"`
+}
+
+func (a *API) people(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	limit, filter, hash, cursor, ok := peoplePage(r)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.ListPeople(r.Context(), p.UserID, filter, limit+1, cursor)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	hasMore := len(v.Items) > limit
+	next := nextCursorPeople(v.Items, limit, hash)
+	if hasMore {
+		v.Items = v.Items[:limit]
+	}
+	out := dto.PeopleList{Items: []dto.PeopleListItem{}, Page: dto.NotesPage{NextCursor: next, HasMore: hasMore}}
+	for _, x := range v.Items {
+		out.Items = append(out.Items, mapPeopleListItem(x))
+	}
+	a.logger.Info("people list completed", "component", "http_api", "operation", "people.list", "operation_id", requestID(r), "result", "success", "result_count", len(out.Items), "has_more", hasMore, "has_search_filter", filter.Query != "", "has_open_actions_filter", filter.HasOpenActions)
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func (a *API) personDetail(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	id, ok := parsePublicID(r.PathValue("id"), "person")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.GetPersonWorkspace(r.Context(), p.UserID, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	out := dto.PersonWorkspaceDetail{Person: dto.PersonProfile{ID: publicID("person", v.Person.PersonID), DisplayName: v.Person.Name, Aliases: boundedAliases(v.Person.Aliases), FirstMentionedAt: v.Person.FirstMentionedAt, LastMentionedAt: v.Person.LastMentionedAt, MentionCount: v.Person.MentionCount}, OpenActions: []dto.Action{}, RecentDecisions: []dto.Decision{}, RecentNotes: []dto.PeopleRecentNote{}, Page: dto.NotesPage{NextCursor: nil, HasMore: false}}
+	for _, x := range v.OpenActions {
+		out.OpenActions = append(out.OpenActions, mapAction(x))
+	}
+	for _, x := range v.RecentDecisions {
+		out.RecentDecisions = append(out.RecentDecisions, dto.Decision{ID: publicID("decision", x.ID), Text: x.Text, Status: x.Status, Topic: x.Topic})
+	}
+	for _, x := range v.RecentNotes {
+		out.RecentNotes = append(out.RecentNotes, mapPeopleRecentNote(x, true))
+	}
+	a.logger.Info("person detail completed", "component", "http_api", "operation", "people.detail", "operation_id", requestID(r), "result", "success", "open_action_count", len(out.OpenActions), "decision_count", len(out.RecentDecisions), "recent_note_count", len(out.RecentNotes))
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func mapPeopleListItem(x store.PeopleListItem) dto.PeopleListItem {
+	return dto.PeopleListItem{ID: publicID("person", x.PersonID), DisplayName: x.Name, Aliases: boundedAliases(x.Aliases), LastMentionedAt: x.LastMentionedAt, MentionCount: x.MentionCount, OpenActionCount: x.OpenActionCount, RecentNote: mapPeopleRecentNotePtr(x.RecentNote, false)}
+}
+func mapPeopleRecentNotePtr(x *store.PeopleRecentNote, includeRaw bool) *dto.PeopleRecentNote {
+	if x == nil {
+		return nil
+	}
+	y := mapPeopleRecentNote(*x, includeRaw)
+	return &y
+}
+func mapPeopleRecentNote(x store.PeopleRecentNote, includeRaw bool) dto.PeopleRecentNote {
+	y := dto.PeopleRecentNote{ID: publicID("note", x.ID), CreatedAt: x.CreatedAt, Summary: x.Summary, ProcessingStatus: x.ProcessingStatus, Tickets: boundedStrings(x.Tickets, 3)}
+	if includeRaw {
+		y.RawTextPreview = runePreview(x.RawText, 400)
+	}
+	return y
+}
+func boundedAliases(in []string) []string { return boundedStrings(in, 10) }
+func boundedStrings(in []string, n int) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, s := range in {
+		k := strings.ToLower(strings.TrimSpace(s))
+		if k == "" || seen[k] {
+			continue
+		}
+		out = append(out, strings.TrimSpace(s))
+		seen[k] = true
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
+}
+
+func peoplePage(r *http.Request) (int, services.PeopleListFilter, string, *store.PeoplePageCursor, bool) {
+	q := r.URL.Query()
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		v, e := strconv.Atoi(raw)
+		if e != nil || v < 1 || v > 50 {
+			return 0, services.PeopleListFilter{}, "", nil, false
+		}
+		limit = v
+	}
+	var f services.PeopleListFilter
+	if raw := strings.TrimSpace(q.Get("query")); raw != "" {
+		raw = strings.Join(strings.Fields(raw), " ")
+		if len([]rune(raw)) < 2 || len([]rune(raw)) > 100 {
+			return 0, f, "", nil, false
+		}
+		f.Query = raw
+	}
+	if raw := q.Get("has_open_actions"); raw != "" {
+		if raw != "true" && raw != "false" {
+			return 0, f, "", nil, false
+		}
+		f.HasOpenActions = raw == "true"
+	}
+	h := peopleFilterHash(f)
+	var c *store.PeoplePageCursor
+	if raw := q.Get("cursor"); raw != "" {
+		b, e := base64.RawURLEncoding.DecodeString(raw)
+		if e != nil {
+			return 0, f, "", nil, false
+		}
+		var pc peopleCursor
+		if json.Unmarshal(b, &pc) != nil || pc.Version != 1 || pc.PersonID <= 0 || pc.LastMentionedAt.IsZero() || pc.FilterHash != h {
+			return 0, f, "", nil, false
+		}
+		c = &store.PeoplePageCursor{LastMentionedAt: pc.LastMentionedAt, PersonID: pc.PersonID}
+	}
+	return limit, f, h, c, true
+}
+func peopleFilterHash(f services.PeopleListFilter) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("v1\x00%s\x00%t", f.Query, f.HasOpenActions)))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+func nextCursorPeople(v []store.PeopleListItem, l int, h string) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	b, _ := json.Marshal(peopleCursor{LastMentionedAt: x.LastMentionedAt, PersonID: x.PersonID, FilterHash: h, Version: 1})
+	s := base64.RawURLEncoding.EncodeToString(b)
+	return &s
 }
