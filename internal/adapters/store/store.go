@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/spozhydaiev/lead-log/internal/apperrors"
 	"github.com/spozhydaiev/lead-log/internal/logging"
 
 	"github.com/spozhydaiev/lead-log/internal/models"
@@ -1662,23 +1663,29 @@ func ticketCursorKey(c *TicketsPageCursor) string {
 func (s *Store) GetTicketWorkspaceProfile(ctx context.Context, userID int64, key string) (TicketProfile, error) {
 	var p TicketProfile
 	err := s.pool.QueryRow(ctx, `SELECT em.normalized_value,min(n.created_at),max(n.created_at),count(DISTINCT em.note_id)::int FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type='ticket' AND em.normalized_value=$2 GROUP BY em.normalized_value`, userID, key).Scan(&p.Key, &p.FirstMentionedAt, &p.LastMentionedAt, &p.MentionCount)
-	return p, err
+	if err != nil {
+		return p, apperrors.Wrap("ticket_repository.get_profile", apperrors.ClassDatabaseQuery, err)
+	}
+	return p, nil
 }
 func (s *Store) RecentNotesForTicket(ctx context.Context, userID int64, key string, limit int) ([]TicketRecentNote, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT n.id,n.created_at,n.summary,n.raw_text,n.processing_status FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type='ticket' AND em.normalized_value=$2 ORDER BY n.created_at DESC,n.id DESC LIMIT $3`, userID, key, limit)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT n.id,n.created_at,n.summary,COALESCE(n.raw_text,''),COALESCE(n.processing_status,'pending') FROM entity_mentions em JOIN notes n ON n.id=em.note_id AND n.user_id=em.user_id WHERE em.user_id=$1 AND em.entity_type='ticket' AND em.normalized_value=$2 ORDER BY n.created_at DESC,n.id DESC LIMIT $3`, userID, key, limit)
 	if err != nil {
-		return nil, err
+		return nil, apperrors.Wrap("ticket_repository.list_recent_notes", apperrors.ClassDatabaseQuery, err)
 	}
 	defer rows.Close()
 	var out []TicketRecentNote
 	for rows.Next() {
 		var x TicketRecentNote
 		if err := rows.Scan(&x.ID, &x.CreatedAt, &x.Summary, &x.RawText, &x.ProcessingStatus); err != nil {
-			return nil, err
+			return nil, apperrors.Wrap("ticket_repository.list_recent_notes", apperrors.ClassDatabaseScan, fmt.Errorf("scan recent ticket note: %w", err))
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, apperrors.Wrap("ticket_repository.list_recent_notes", apperrors.ClassDatabaseQuery, err)
+	}
+	return out, nil
 }
 func (s *Store) PeopleForNotes(ctx context.Context, userID int64, noteIDs []int64, perNote int) (map[int64][]PersonRef, error) {
 	out := map[int64][]PersonRef{}
@@ -1701,20 +1708,23 @@ func (s *Store) PeopleForNotes(ctx context.Context, userID int64, noteIDs []int6
 	return out, rows.Err()
 }
 func (s *Store) OpenActionsForTicket(ctx context.Context, userID int64, key string, limit int) ([]APIAction, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT a.id,a.note_id,a.title,a.status,p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a JOIN entity_mentions em ON em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.status='open' ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, key, limit)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT a.id,a.note_id,COALESCE(a.title,''),COALESCE(a.status,'open'),p.name,p.id,a.due_at,a.created_at,a.completed_at FROM actions a JOIN entity_mentions em ON em.user_id=a.user_id AND em.note_id=a.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 LEFT JOIN people p ON p.id=a.linked_person_id AND p.user_id=a.user_id WHERE a.user_id=$1 AND a.status='open' ORDER BY (a.due_at IS NULL),a.due_at ASC,a.created_at DESC,a.id DESC LIMIT $3`, userID, key, limit)
 	if err != nil {
-		return nil, err
+		return nil, apperrors.Wrap("ticket_repository.list_open_actions", apperrors.ClassDatabaseQuery, err)
 	}
 	defer rows.Close()
 	var out []APIAction
 	for rows.Next() {
 		var a APIAction
 		if err := rows.Scan(&a.ID, &a.NoteID, &a.Title, &a.Status, &a.PersonName, &a.PersonID, &a.DueAt, &a.CreatedAt, &a.CompletedAt); err != nil {
-			return nil, err
+			return nil, apperrors.Wrap("ticket_repository.list_open_actions", apperrors.ClassDatabaseScan, fmt.Errorf("scan ticket action: %w", err))
 		}
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, apperrors.Wrap("ticket_repository.list_open_actions", apperrors.ClassDatabaseQuery, err)
+	}
+	return out, nil
 }
 func (s *Store) RecentDecisionsForTicket(ctx context.Context, userID int64, key string, limit int) ([]DecisionView, error) {
 	rows, err := s.pool.Query(ctx, `SELECT DISTINCT d.id,d.text,d.status,COALESCE(d.topic,'') FROM decisions d JOIN entity_mentions em ON em.user_id=d.user_id AND em.note_id=d.note_id AND em.entity_type='ticket' AND em.normalized_value=$2 WHERE d.user_id=$1 ORDER BY d.id DESC LIMIT $3`, userID, key, limit)
