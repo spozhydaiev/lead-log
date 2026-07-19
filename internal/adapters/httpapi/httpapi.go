@@ -56,6 +56,8 @@ type Service interface {
 	GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error)
 	ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error)
 	GetPersonWorkspace(context.Context, int64, int64) (services.PersonWorkspaceView, error)
+	ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error)
+	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
@@ -106,6 +108,8 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/notes/{id}", a.auth(http.HandlerFunc(a.noteDetail)))
 	mux.Handle("GET /api/v1/today", a.auth(http.HandlerFunc(a.today)))
 	mux.Handle("POST /api/v1/notes", a.auth(http.HandlerFunc(a.notes)))
+	mux.Handle("GET /api/v1/tickets", a.auth(http.HandlerFunc(a.tickets)))
+	mux.Handle("GET /api/v1/tickets/{key}", a.auth(http.HandlerFunc(a.ticketDetail)))
 	mux.Handle("GET /api/v1/people", a.auth(http.HandlerFunc(a.people)))
 	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
@@ -964,4 +968,137 @@ func nextCursorPeople(v []store.PeopleListItem, l int, h string) *string {
 	b, _ := json.Marshal(peopleCursor{LastMentionedAt: x.LastMentionedAt, PersonID: x.PersonID, FilterHash: h, Version: 1})
 	s := base64.RawURLEncoding.EncodeToString(b)
 	return &s
+}
+
+type ticketsCursor struct {
+	LastMentionedAt time.Time `json:"last_mentioned_at"`
+	Key             string    `json:"key"`
+	FilterHash      string    `json:"filter_hash"`
+	Version         int       `json:"v"`
+}
+
+func (a *API) tickets(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	limit, filter, hash, cursor, ok := ticketsPage(r)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.ListTickets(r.Context(), p.UserID, filter, limit+1, cursor)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	hasMore := len(v.Items) > limit
+	next := nextCursorTickets(v.Items, limit, hash)
+	if hasMore {
+		v.Items = v.Items[:limit]
+	}
+	out := dto.TicketsList{Items: []dto.TicketListItem{}, Page: dto.NotesPage{NextCursor: next, HasMore: hasMore}}
+	for _, x := range v.Items {
+		out.Items = append(out.Items, mapTicketListItem(x))
+	}
+	a.logger.Info("tickets list completed", "component", "http_api", "operation", "tickets.list", "operation_id", requestID(r), "result", "success", "result_count", len(out.Items), "has_more", hasMore, "has_search_filter", filter.Query != "", "has_open_actions_filter", filter.HasOpenActions)
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+func (a *API) ticketDetail(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	key, ok := services.NormalizeWorkspaceTicketKey(r.PathValue("key"))
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.GetTicketWorkspace(r.Context(), p.UserID, key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	out := dto.TicketWorkspaceDetail{Ticket: dto.TicketProfile{Key: v.Ticket.Key, FirstMentionedAt: v.Ticket.FirstMentionedAt, LastMentionedAt: v.Ticket.LastMentionedAt, MentionCount: v.Ticket.MentionCount}, OpenActions: []dto.Action{}, RecentDecisions: []dto.Decision{}, RecentNotes: []dto.TicketRecentNote{}, Page: dto.NotesPage{NextCursor: nil, HasMore: false}}
+	for _, x := range v.OpenActions {
+		out.OpenActions = append(out.OpenActions, mapAction(x))
+	}
+	for _, x := range v.RecentDecisions {
+		out.RecentDecisions = append(out.RecentDecisions, dto.Decision{ID: publicID("decision", x.ID), Text: x.Text, Status: x.Status, Topic: x.Topic})
+	}
+	for _, x := range v.RecentNotes {
+		out.RecentNotes = append(out.RecentNotes, mapTicketRecentNote(x, true))
+	}
+	a.logger.Info("ticket detail completed", "component", "http_api", "operation", "tickets.detail", "operation_id", requestID(r), "result", "success", "open_action_count", len(out.OpenActions), "decision_count", len(out.RecentDecisions), "recent_note_count", len(out.RecentNotes))
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+func ticketsPage(r *http.Request) (int, services.TicketsListFilter, string, *store.TicketsPageCursor, bool) {
+	q := r.URL.Query()
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		v, e := strconv.Atoi(raw)
+		if e != nil || v < 1 || v > 50 {
+			return 0, services.TicketsListFilter{}, "", nil, false
+		}
+		limit = v
+	}
+	var f services.TicketsListFilter
+	if raw := strings.TrimSpace(q.Get("query")); raw != "" {
+		raw = strings.ToUpper(strings.Join(strings.Fields(raw), " "))
+		if len([]rune(raw)) < 2 || len([]rune(raw)) > 50 {
+			return 0, f, "", nil, false
+		}
+		f.Query = raw
+	}
+	if raw := q.Get("has_open_actions"); raw != "" {
+		if raw != "true" && raw != "false" {
+			return 0, f, "", nil, false
+		}
+		f.HasOpenActions = raw == "true"
+	}
+	h := ticketsFilterHash(f)
+	var c *store.TicketsPageCursor
+	if raw := q.Get("cursor"); raw != "" {
+		b, e := base64.RawURLEncoding.DecodeString(raw)
+		if e != nil {
+			return 0, f, "", nil, false
+		}
+		var tc ticketsCursor
+		if json.Unmarshal(b, &tc) != nil || tc.Version != 1 || tc.Key == "" || tc.LastMentionedAt.IsZero() || tc.FilterHash != h {
+			return 0, f, "", nil, false
+		}
+		c = &store.TicketsPageCursor{LastMentionedAt: tc.LastMentionedAt, Key: tc.Key}
+	}
+	return limit, f, h, c, true
+}
+func ticketsFilterHash(f services.TicketsListFilter) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("v1\x00%s\x00%t", f.Query, f.HasOpenActions)))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+func nextCursorTickets(v []store.TicketListItem, l int, h string) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	b, _ := json.Marshal(ticketsCursor{LastMentionedAt: x.LastMentionedAt, Key: x.Key, FilterHash: h, Version: 1})
+	s := base64.RawURLEncoding.EncodeToString(b)
+	return &s
+}
+func mapTicketListItem(x store.TicketListItem) dto.TicketListItem {
+	return dto.TicketListItem{Key: x.Key, FirstMentionedAt: x.FirstMentionedAt, LastMentionedAt: x.LastMentionedAt, MentionCount: x.MentionCount, OpenActionCount: x.OpenActionCount, RecentNote: mapTicketRecentNotePtr(x.RecentNote, false)}
+}
+func mapTicketRecentNotePtr(x *store.TicketRecentNote, includeRaw bool) *dto.TicketRecentNote {
+	if x == nil {
+		return nil
+	}
+	y := mapTicketRecentNote(*x, includeRaw)
+	return &y
+}
+func mapTicketRecentNote(x store.TicketRecentNote, includeRaw bool) dto.TicketRecentNote {
+	y := dto.TicketRecentNote{ID: publicID("note", x.ID), CreatedAt: x.CreatedAt, Summary: x.Summary, ProcessingStatus: x.ProcessingStatus, People: []dto.LinkedPerson{}}
+	if includeRaw {
+		y.RawTextPreview = runePreview(x.RawText, 400)
+	}
+	for _, p := range x.People {
+		y.People = append(y.People, dto.LinkedPerson{ID: publicID("person", p.PersonID), DisplayName: p.Name})
+	}
+	return y
 }
