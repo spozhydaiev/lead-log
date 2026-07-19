@@ -413,6 +413,13 @@ func (f *fakeBotService) EnsureUser(ctx context.Context, telegramUserID int64, u
 	f.ensureCalls++
 	return telegramUserID + 10, nil
 }
+func (f *fakeBotService) ResolveTelegramUser(ctx context.Context, telegramUserID, chatID int64) (int64, error) {
+	f.ensureCalls++
+	return telegramUserID + 10, nil
+}
+func (f *fakeBotService) ConsumeTelegramLink(ctx context.Context, token string, telegramUserID, chatID int64, sessionTTL time.Duration) (store.LinkConsumeResult, string, error) {
+	return store.LinkConsumeSuccess, "", nil
+}
 func (f *fakeBotService) CaptureNote(ctx context.Context, userID int64, raw string) (string, error) {
 	f.captureCalls++
 	f.lastRaw = raw

@@ -24,7 +24,8 @@ type Bot struct {
 }
 
 type service interface {
-	EnsureUser(ctx context.Context, telegramUserID int64, username string) (int64, error)
+	ResolveTelegramUser(ctx context.Context, telegramUserID, chatID int64) (int64, error)
+	ConsumeTelegramLink(ctx context.Context, token string, telegramUserID, chatID int64, sessionTTL time.Duration) (store.LinkConsumeResult, string, error)
 	CaptureNote(ctx context.Context, userID int64, raw string) (string, error)
 	AddNote(ctx context.Context, userID int64, raw string) (string, error)
 	OpenActions(ctx context.Context, userID int64) (string, error)
@@ -97,27 +98,41 @@ func (b *Bot) handleMessageWithReply(ctx context.Context, msg *tgbotapi.Message,
 func (b *Bot) handleMessageWithUpdateAndReply(ctx context.Context, updateID int64, msg *tgbotapi.Message, reply func(chatID int64, text string)) {
 	ctx, operationID := logging.EnsureOperationID(ctx)
 	telegramUserID := msg.From.ID
-	if !config.IsTelegramUserAllowed(b.cfg.AllowedTelegramUserIDs, telegramUserID) {
-		b.logger.Warn("authorization denied", "operation", "authorization", "operation_id", operationID, "result", "denied")
+	text := strings.TrimSpace(msg.Text)
+	cmd, arg := splitCommand(text)
+	if cmd == "/start" && strings.HasPrefix(arg, "link_") {
+		res, _, err := b.svc.ConsumeTelegramLink(ctx, strings.TrimPrefix(arg, "link_"), telegramUserID, msg.Chat.ID, b.cfg.AuthSessionTTL)
+		if err != nil {
+			b.logger.Info("telegram link failed", "operation", "telegram_link.consume", "operation_id", operationID, "result", string(res))
+		}
+		if res == store.LinkConsumeSuccess {
+			reply(msg.Chat.ID, "Telegram successfully connected to your Lead Log account.")
+		} else if res == store.LinkConsumeConflict {
+			reply(msg.Chat.ID, "This Telegram account is already connected to another Lead Log account or cannot be merged automatically.")
+		} else {
+			reply(msg.Chat.ID, "This connection link is invalid or has expired. Generate a new link in Lead Log.")
+		}
+		return
+	}
+
+	if len(b.cfg.AllowedTelegramUserIDs) > 0 && !config.IsTelegramUserAllowed(b.cfg.AllowedTelegramUserIDs, telegramUserID) {
+		b.logger.Warn("authorization denied", "operation", "authorization", "operation_id", operationID, "result", "not_allowlisted")
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().AccessDenied)
 		return
 	}
-
-	userID, err := b.svc.EnsureUser(ctx, telegramUserID, msg.From.UserName)
+	userID, err := b.svc.ResolveTelegramUser(ctx, telegramUserID, msg.Chat.ID)
 	if err != nil {
-		b.logger.Error("command failed", logging.WithSafeError([]any{"operation", "bot.ensure_user", "operation_id", operationID}, err)...)
-		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UserInitFailed)
+		b.logger.Warn("authorization denied", "operation", "authorization", "operation_id", operationID, "result", "not_linked")
+		reply(msg.Chat.ID, "Your Telegram account is not connected to Lead Log. Connect it from the web application.")
 		return
 	}
 
-	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		b.logger.Info("incoming message", "operation", "bot.handle_message", "operation_id", operationID, "message_type", "unsupported")
 		reply(msg.Chat.ID, b.cfg.ResponseLanguage.CommonMessages().UnsupportedText)
 		return
 	}
 
-	cmd, arg := splitCommand(text)
 	messageType := "plain_text"
 	if cmd != "" {
 		messageType = "command"
