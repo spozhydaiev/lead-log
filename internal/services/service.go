@@ -17,9 +17,12 @@ import (
 	"github.com/spozhydaiev/lead-log/pkg/utils"
 )
 
-const PromptVersion = "v2"
-const NoteEnrichmentPromptVersion = "v2"
-const DefaultNoteEnrichmentStaleTimeout = 3 * time.Minute
+const (
+	PromptVersion                     = "v2"
+	NoteEnrichmentPromptVersion       = "v2" // const NoteEnrichmentPromptVersion = "v2"
+	DefaultNoteEnrichmentStaleTimeout = 3 * time.Minute
+	DefaultSummaryGenerationTimeout   = 90 * time.Second
+)
 
 type Service struct {
 	store                      *store.Store
@@ -28,10 +31,11 @@ type Service struct {
 	logger                     *slog.Logger
 	language                   models.ResponseLanguage
 	noteEnrichmentStaleTimeout time.Duration
+	summaryGenerationTimeout   time.Duration
 }
 
 func New(store *store.Store, llm llm.ClientLLM, opts ...Option) *Service {
-	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default(), language: models.LanguageEnglish, noteEnrichmentStaleTimeout: DefaultNoteEnrichmentStaleTimeout}
+	s := &Service{store: store, llm: llm, dailyLocation: time.Local, logger: slog.Default(), language: models.LanguageEnglish, noteEnrichmentStaleTimeout: DefaultNoteEnrichmentStaleTimeout, summaryGenerationTimeout: DefaultSummaryGenerationTimeout}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -60,6 +64,14 @@ func WithNoteEnrichmentStaleTimeout(timeout time.Duration) Option {
 	return func(s *Service) {
 		if timeout > 0 {
 			s.noteEnrichmentStaleTimeout = timeout
+		}
+	}
+}
+
+func WithSummaryGenerationTimeout(timeout time.Duration) Option {
+	return func(s *Service) {
+		if timeout > 0 {
+			s.summaryGenerationTimeout = timeout
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/logging"
 	"github.com/spozhydaiev/lead-log/internal/models"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
 )
@@ -83,6 +84,12 @@ func (s *Service) GetSummary(ctx context.Context, userID, id int64) (SummaryView
 	return s.mapSummary(ctx, userID, r, true), nil
 }
 func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryGenerateInput) (SummaryGenerateResult, error) {
+	if s.summaryGenerationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.summaryGenerationTimeout)
+		defer cancel()
+	}
+	started := time.Now()
 	start, end, scope, err := s.summaryPeriod(in.Type, in.AnchorDate)
 	if err != nil {
 		return SummaryGenerateResult{}, err
@@ -94,7 +101,9 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 	mu.Lock()
 	defer mu.Unlock()
 	defer summaryLocks.Delete(lockKey)
+	retrievalStarted := time.Now()
 	source, err := s.summarySource(ctx, userID, in.Type, start, end)
+	retrievalMS := time.Since(retrievalStarted).Milliseconds()
 	if err != nil {
 		return SummaryGenerateResult{}, err
 	}
@@ -122,19 +131,25 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 			return SummaryGenerateResult{}, err
 		}
 	} else {
+		llmStarted := time.Now()
 		raw, err := s.llm.SummarizeWeekly(ctx, source)
+		llmMS := time.Since(llmStarted).Milliseconds()
 		if err != nil {
 			return SummaryGenerateResult{}, err
 		}
+		parseStarted := time.Now()
 		digest, err := llm.ParseWeeklyDigestJSONWithLogger(raw, s.logger)
+		parseMS := time.Since(parseStarted).Milliseconds()
 		if err != nil {
-			return SummaryGenerateResult{}, err
+			return SummaryGenerateResult{}, logging.NewCodedError("malformed_provider_output", "malformed weekly provider output", err)
 		}
 		b, _ := json.Marshal(digest)
 		text := FormatWeeklyDigest(digest)
+		persistStarted := time.Now()
 		if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &end, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: text, ResponseJSON: string(b)}); err != nil {
 			return SummaryGenerateResult{}, err
 		}
+		s.logger.Info("summary generation completed", "operation", "weekly.generate", "source_count", approximateSourceCount(source), "source_byte_length", len(source), "retrieval_ms", retrievalMS, "llm_ms", llmMS, "parse_ms", parseMS, "persist_ms", time.Since(persistStarted).Milliseconds(), "duration_ms", time.Since(started).Milliseconds(), "result", "success")
 	}
 	cached, err := s.store.GetCachedAgentResponse(ctx, userID, in.Type, scopeKey, sourceHash, PromptVersion)
 	if err != nil {
@@ -320,4 +335,12 @@ func runePreview(s string, max int) string {
 		return string(r[:max])
 	}
 	return string(r)
+}
+
+func approximateSourceCount(source string) int {
+	trimmed := strings.TrimSpace(source)
+	if trimmed == "" {
+		return 0
+	}
+	return strings.Count(trimmed, "\n") + 1
 }

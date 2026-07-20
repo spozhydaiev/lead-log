@@ -20,21 +20,22 @@ import (
 )
 
 type fakeService struct {
-	user           store.WebUser
-	notes          []store.APINote
-	actions        []store.APIAction
-	created        bool
-	registeredUser store.CurrentUser
-	people         services.PeopleListView
-	person         services.PersonWorkspaceView
-	tickets        services.TicketsListView
-	ticket         services.TicketWorkspaceView
-	ticketErr      error
-	askResp        services.AskResponse
-	askErr         error
-	summaries      services.SummaryListView
-	summary        services.SummaryView
-	generateResp   services.SummaryGenerateResult
+	user             store.WebUser
+	notes            []store.APINote
+	actions          []store.APIAction
+	created          bool
+	registeredUser   store.CurrentUser
+	people           services.PeopleListView
+	person           services.PersonWorkspaceView
+	tickets          services.TicketsListView
+	ticket           services.TicketWorkspaceView
+	ticketErr        error
+	askResp          services.AskResponse
+	askErr           error
+	summaries        services.SummaryListView
+	summary          services.SummaryView
+	generateResp     services.SummaryGenerateResult
+	generateDeadline time.Duration
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -137,7 +138,10 @@ func (f *fakeService) GetSummary(_ context.Context, _ int64, id int64) (services
 	}
 	return services.SummaryView{}, pgx.ErrNoRows
 }
-func (f *fakeService) GenerateSummary(context.Context, int64, services.SummaryGenerateInput) (services.SummaryGenerateResult, error) {
+func (f *fakeService) GenerateSummary(ctx context.Context, _ int64, _ services.SummaryGenerateInput) (services.SummaryGenerateResult, error) {
+	if d, ok := ctx.Deadline(); ok {
+		f.generateDeadline = time.Until(d)
+	}
 	return f.generateResp, nil
 }
 
@@ -557,5 +561,18 @@ func TestSummariesAPI(t *testing.T) {
 	h.ServeHTTP(wr, r)
 	if wr.Code != 200 || !strings.Contains(wr.Body.String(), `"reason":"no_source_notes"`) || wr.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("generate failed: %d %s", wr.Code, wr.Body.String())
+	}
+}
+
+func TestGenerateSummaryUsesConfiguredSummaryTimeout(t *testing.T) {
+	now := time.Date(2026, 7, 19, 18, 0, 4, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, generateResp: services.SummaryGenerateResult{Period: services.SummaryPeriod{From: "2026-07-14", To: "2026-07-20"}}}
+	h := New(svc, nil, Config{AllowedOrigins: []string{"http://localhost:3000"}, Now: func() time.Time { return now }, SessionCookieName: "lead_log_session", SummaryGenerationTimeout: 90 * time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "POST", "/api/v1/summaries/generate", `{"type":"weekly","anchor_date":"2026-07-19","force":false}`, "top-secret-token")
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
+	}
+	if svc.generateDeadline < 80*time.Second {
+		t.Fatalf("generate deadline = %v, want summary-specific timeout near 90s", svc.generateDeadline)
 	}
 }

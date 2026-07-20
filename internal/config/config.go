@@ -17,6 +17,8 @@ type Config struct {
 	LLMBaseURL                      string
 	LLMAPIKey                       string
 	LLMModel                        string
+	LLMRequestTimeout               time.Duration
+	SummaryGenerationTimeout        time.Duration
 	AllowedTelegramUserIDs          map[int64]bool
 	DailySummaryEnabled             bool
 	DailySummaryTime                string
@@ -82,6 +84,12 @@ func Load() Config {
 	noteEnrichmentWorkerConcurrency := parsePositiveInt("NOTE_ENRICHMENT_WORKER_CONCURRENCY", 1)
 	noteEnrichmentMaxAttempts := parsePositiveInt("NOTE_ENRICHMENT_MAX_ATTEMPTS", 3)
 
+	llmRequestTimeout := parseDuration("LLM_REQUEST_TIMEOUT", "75s")
+	summaryGenerationTimeout := parseDuration("SUMMARY_GENERATION_TIMEOUT", "90s")
+	if summaryGenerationTimeout <= llmRequestTimeout+10*time.Second {
+		panic("invalid env var SUMMARY_GENERATION_TIMEOUT: must exceed LLM_REQUEST_TIMEOUT by more than 10s")
+	}
+
 	responseLanguage, err := models.ParseResponseLanguage(envOr("RESPONSE_LANGUAGE", string(models.LanguageEnglish)))
 	if err != nil {
 		panic(err.Error())
@@ -93,6 +101,8 @@ func Load() Config {
 		LLMBaseURL:                      envOr("LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:                       mustEnv("LLM_API_KEY"),
 		LLMModel:                        envOr("LLM_MODEL", "gpt-4.1-mini"),
+		LLMRequestTimeout:               llmRequestTimeout,
+		SummaryGenerationTimeout:        summaryGenerationTimeout,
 		AllowedTelegramUserIDs:          mustAllowedUsers(os.Getenv("ALLOWED_TELEGRAM_USER_IDS")),
 		DailySummaryEnabled:             parseBool(os.Getenv("DAILY_SUMMARY_ENABLED")),
 		DailySummaryTime:                dailyTime,
@@ -113,7 +123,7 @@ func Load() Config {
 		HTTPAddress:                     envOr("HTTP_ADDRESS", "0.0.0.0"),
 		HTTPPort:                        parsePositiveInt("HTTP_PORT", 8080),
 		HTTPReadTimeout:                 parseDuration("HTTP_READ_TIMEOUT", "10s"),
-		HTTPWriteTimeout:                parseDuration("HTTP_WRITE_TIMEOUT", "30s"),
+		HTTPWriteTimeout:                parseDuration("HTTP_WRITE_TIMEOUT", "120s"),
 		HTTPIdleTimeout:                 parseDuration("HTTP_IDLE_TIMEOUT", "60s"),
 		FrontendOrigins:                 parseCSV(envOr("FRONTEND_ORIGINS", os.Getenv("HTTP_ALLOWED_ORIGINS"))),
 		AuthSessionCookieName:           envOr("AUTH_SESSION_COOKIE_NAME", "lead_log_session"),
