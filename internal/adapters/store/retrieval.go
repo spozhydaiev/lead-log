@@ -36,7 +36,20 @@ func (s *Store) ResolvePerson(ctx context.Context, userID int64, name string) (R
 	if userID <= 0 || norm == "" {
 		return ResolvedPerson{}, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT p.id, p.name, pa.alias FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id WHERE pa.user_id=$1 AND pa.normalized_alias=$2 LIMIT 2`, userID, norm)
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE chain(alias, id, name, merged_into_person_id, depth, path) AS (
+			SELECT pa.alias, p.id, p.name, p.merged_into_person_id, 0, ARRAY[p.id]
+			FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id
+			WHERE pa.user_id=$1 AND pa.normalized_alias=$2
+			UNION ALL
+			SELECT c.alias, p.id, p.name, p.merged_into_person_id, c.depth+1, c.path || p.id
+			FROM chain c JOIN people p ON p.id=c.merged_into_person_id AND p.user_id=$1
+			WHERE c.merged_into_person_id IS NOT NULL AND c.depth < 10 AND NOT p.id = ANY(c.path)
+		), resolved AS (
+			SELECT DISTINCT ON (alias) id, name, alias, merged_into_person_id, depth FROM chain ORDER BY alias, (merged_into_person_id IS NULL) DESC, depth DESC
+		)
+		SELECT id, name, alias FROM resolved WHERE merged_into_person_id IS NULL LIMIT 2
+	`, userID, norm)
 	if err != nil {
 		return ResolvedPerson{}, err
 	}
@@ -59,7 +72,7 @@ func (s *Store) ResolvePerson(ctx context.Context, userID int64, name string) (R
 	if len(matches) == 1 {
 		return matches[0], nil
 	}
-	rows, err = s.pool.Query(ctx, `SELECT id, name FROM people WHERE user_id=$1 AND lower(regexp_replace(trim(name), '\s+', ' ', 'g'))=$2 LIMIT 2`, userID, norm)
+	rows, err = s.pool.Query(ctx, `SELECT id, name FROM people WHERE user_id=$1 AND normalized_name=$2 AND merged_into_person_id IS NULL LIMIT 2`, userID, norm)
 	if err != nil {
 		return ResolvedPerson{}, err
 	}

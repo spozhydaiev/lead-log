@@ -35,15 +35,15 @@ func (s *Service) GetPersonWorkspace(ctx context.Context, userID, personID int64
 		return PersonWorkspaceView{}, err
 	}
 	v := PersonWorkspaceView{Person: p, OpenActions: []store.APIAction{}, RecentDecisions: []store.DecisionView{}, RecentNotes: []store.PeopleRecentNote{}}
-	if v.OpenActions, err = s.store.OpenActionsForPerson(ctx, userID, personID, PeopleOpenActionsLimit); err != nil {
+	if v.OpenActions, err = s.store.OpenActionsForPerson(ctx, userID, p.PersonID, PeopleOpenActionsLimit); err != nil {
 		return v, err
 	}
-	if v.RecentDecisions, err = s.store.RecentDecisionsForPerson(ctx, userID, personID, PeopleRecentDecisionsLimit); err != nil {
+	if v.RecentDecisions, err = s.store.RecentDecisionsForPerson(ctx, userID, p.PersonID, PeopleRecentDecisionsLimit); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return v, err
 		}
 	}
-	if v.RecentNotes, err = s.store.RecentNotesForPerson(ctx, userID, personID, PeopleRecentNotesLimit); err != nil {
+	if v.RecentNotes, err = s.store.RecentNotesForPerson(ctx, userID, p.PersonID, PeopleRecentNotesLimit); err != nil {
 		return v, err
 	}
 	return v, nil

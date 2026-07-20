@@ -126,6 +126,12 @@ type PeoplePageCursor struct {
 type PeopleListItem struct {
 	PersonID         int64
 	Name             string
+	FirstName        *string
+	LastName         *string
+	JobTitle         *string
+	Team             *string
+	Company          *string
+	UpdatedAt        time.Time
 	Aliases          []string
 	FirstMentionedAt time.Time
 	LastMentionedAt  time.Time
@@ -144,12 +150,22 @@ type PeopleRecentNote struct {
 }
 
 type PersonProfile struct {
-	PersonID         int64
-	Name             string
-	Aliases          []string
-	FirstMentionedAt time.Time
-	LastMentionedAt  time.Time
-	MentionCount     int
+	PersonID           int64
+	RequestedPersonID  int64
+	CanonicalPersonID  int64
+	Name               string
+	Aliases            []string
+	FirstName          *string
+	LastName           *string
+	JobTitle           *string
+	Team               *string
+	Company            *string
+	Notes              *string
+	UpdatedAt          time.Time
+	MergedIntoPersonID *int64
+	FirstMentionedAt   time.Time
+	LastMentionedAt    time.Time
+	MentionCount       int
 }
 
 // TicketsListFilter constrains the Tickets workspace list query.
@@ -661,37 +677,88 @@ func upsertPerson(ctx context.Context, tx pgx.Tx, userID int64, name string) (in
 		return 0, fmt.Errorf("person name is empty")
 	}
 
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2::bigint))`, fmt.Sprintf("person:%d:%s", userID, normalized), userID); err != nil {
+		return 0, err
+	}
+
+	if id, ok, err := lookupAliasPerson(ctx, tx, userID, normalized); err != nil || ok {
+		return id, err
+	}
+
 	var id int64
 	err := tx.QueryRow(ctx, `
-		SELECT person_id
-		FROM person_aliases
-		WHERE user_id = $1 AND normalized_alias = $2
+		SELECT id
+		FROM people
+		WHERE user_id=$1 AND normalized_name=$2 AND merged_into_person_id IS NULL
+		ORDER BY id
 		LIMIT 1
 	`, userID, normalized).Scan(&id)
 	if err == nil {
-		return id, nil
+		var owner int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO person_aliases (user_id, person_id, alias, normalized_alias)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (user_id, normalized_alias) DO UPDATE SET alias=person_aliases.alias
+			RETURNING person_id
+		`, userID, id, name, normalized).Scan(&owner); err != nil {
+			return 0, err
+		}
+		return owner, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, err
 	}
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO people (user_id, name)
-		VALUES ($1, $2)
-		ON CONFLICT (user_id, name)
-		DO UPDATE SET name = EXCLUDED.name
+		INSERT INTO people (user_id, name, normalized_name, updated_at)
+		VALUES ($1, $2, $3, now())
 		RETURNING id
-	`, userID, name).Scan(&id)
+	`, userID, name, normalized).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
 
-	_, err = tx.Exec(ctx, `
+	var owner int64
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO person_aliases (user_id, person_id, alias, normalized_alias)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, normalized_alias) DO NOTHING
-	`, userID, id, name, normalized)
-	return id, err
+		ON CONFLICT (user_id, normalized_alias) DO UPDATE SET alias=person_aliases.alias
+		RETURNING person_id
+	`, userID, id, name, normalized).Scan(&owner); err != nil {
+		return 0, err
+	}
+	if owner != id {
+		if _, err := tx.Exec(ctx, `DELETE FROM people WHERE user_id=$1 AND id=$2`, userID, id); err != nil {
+			return 0, err
+		}
+		return owner, nil
+	}
+	return id, nil
+}
+
+func lookupAliasPerson(ctx context.Context, tx pgx.Tx, userID int64, normalized string) (int64, bool, error) {
+	var id int64
+	err := tx.QueryRow(ctx, `
+		WITH RECURSIVE chain(id, merged_into_person_id, depth, path) AS (
+			SELECT p.id, p.merged_into_person_id, 0, ARRAY[p.id]
+			FROM person_aliases pa
+			JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id
+			WHERE pa.user_id=$1 AND pa.normalized_alias=$2
+			UNION ALL
+			SELECT p.id, p.merged_into_person_id, c.depth+1, c.path || p.id
+			FROM chain c
+			JOIN people p ON p.id=c.merged_into_person_id AND p.user_id=$1
+			WHERE c.merged_into_person_id IS NOT NULL AND c.depth < 10 AND NOT p.id = ANY(c.path)
+		)
+		SELECT id FROM chain ORDER BY (merged_into_person_id IS NULL) DESC, depth DESC LIMIT 1
+	`, userID, normalized).Scan(&id)
+	if err == nil {
+		return id, true, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return 0, false, err
 }
 
 func (s *Store) ClaimNoteForEnrichment(ctx context.Context, userID, noteID int64, staleAfter time.Duration, allowProcessed bool) (NoteForEnrichment, error) {
@@ -1458,13 +1525,13 @@ func (s *Store) CleanupAuth(ctx context.Context, now time.Time, limit int) (int6
 func (s *Store) ListPeopleWorkspace(ctx context.Context, userID int64, f PeopleListFilter, limit int, cursor *PeoplePageCursor) ([]PeopleListItem, error) {
 	rows, err := s.pool.Query(ctx, `
 		WITH base AS (
-			SELECT p.id, p.name, min(pn.created_at) AS first_mentioned_at, max(pn.created_at) AS last_mentioned_at, count(*)::int AS mention_count
+			SELECT p.id, p.name, p.first_name, p.last_name, p.job_title, p.team, p.company, p.updated_at, min(pn.created_at) AS first_mentioned_at, max(pn.created_at) AS last_mentioned_at, count(*)::int AS mention_count
 			FROM people p
 			JOIN people_notes pn ON pn.person_id=p.id AND pn.user_id=p.user_id
-			WHERE p.user_id=$1
+			WHERE p.user_id=$1 AND p.merged_into_person_id IS NULL
 			  AND ($2::text = '' OR p.name ILIKE '%' || $2 || '%' OR EXISTS (SELECT 1 FROM person_aliases pa WHERE pa.user_id=p.user_id AND pa.person_id=p.id AND pa.alias ILIKE '%' || $2 || '%'))
 			  AND ($3::bool = false OR EXISTS (SELECT 1 FROM actions a WHERE a.user_id=p.user_id AND a.linked_person_id=p.id AND a.status='open'))
-			GROUP BY p.id, p.name
+			GROUP BY p.id, p.name, p.first_name, p.last_name, p.job_title, p.team, p.company, p.updated_at
 		), page AS (
 			SELECT * FROM base
 			WHERE ($4::timestamptz IS NULL OR (last_mentioned_at,id)<($4,$5))
@@ -1481,7 +1548,7 @@ func (s *Store) ListPeopleWorkspace(ctx context.Context, userID int64, f PeopleL
 			FROM people_notes pn JOIN page pg ON pg.id=pn.person_id JOIN notes n ON n.id=pn.note_id AND n.user_id=pn.user_id
 			WHERE pn.user_id=$1 ORDER BY pn.person_id,n.created_at DESC,n.id DESC
 		)
-		SELECT pg.id,pg.name,COALESCE(al.aliases,'{}'),pg.first_mentioned_at,pg.last_mentioned_at,pg.mention_count,COALESCE(oa.cnt,0),r.id,r.created_at,r.summary,r.raw_text,r.processing_status
+		SELECT pg.id,pg.name,pg.first_name,pg.last_name,pg.job_title,pg.team,pg.company,pg.updated_at,COALESCE(al.aliases,'{}'),pg.first_mentioned_at,pg.last_mentioned_at,pg.mention_count,COALESCE(oa.cnt,0),r.id,r.created_at,r.summary,r.raw_text,r.processing_status
 		FROM page pg LEFT JOIN aliases al ON al.person_id=pg.id LEFT JOIN open_actions oa ON oa.person_id=pg.id LEFT JOIN recent r ON r.person_id=pg.id
 		ORDER BY pg.last_mentioned_at DESC,pg.id DESC`, userID, f.Query, f.HasOpenActions, peopleCursorTime(cursor), peopleCursorID(cursor), limit)
 	if err != nil {
@@ -1497,7 +1564,7 @@ func (s *Store) ListPeopleWorkspace(ctx context.Context, userID int64, f PeopleL
 		var summary *string
 		var raw *string
 		var status *string
-		if err := rows.Scan(&x.PersonID, &x.Name, &x.Aliases, &x.FirstMentionedAt, &x.LastMentionedAt, &x.MentionCount, &x.OpenActionCount, &nid, &ncreated, &summary, &raw, &status); err != nil {
+		if err := rows.Scan(&x.PersonID, &x.Name, &x.FirstName, &x.LastName, &x.JobTitle, &x.Team, &x.Company, &x.UpdatedAt, &x.Aliases, &x.FirstMentionedAt, &x.LastMentionedAt, &x.MentionCount, &x.OpenActionCount, &nid, &ncreated, &summary, &raw, &status); err != nil {
 			return nil, err
 		}
 		if nid != nil && ncreated != nil {
@@ -1531,11 +1598,26 @@ func peopleCursorID(c *PeoplePageCursor) int64 {
 
 func (s *Store) GetPersonWorkspaceProfile(ctx context.Context, userID, personID int64, aliasLimit int) (PersonProfile, error) {
 	var p PersonProfile
-	err := s.pool.QueryRow(ctx, `SELECT p.id,p.name,min(pn.created_at),max(pn.created_at),count(*)::int FROM people p JOIN people_notes pn ON pn.person_id=p.id AND pn.user_id=p.user_id WHERE p.user_id=$1 AND p.id=$2 GROUP BY p.id,p.name`, userID, personID).Scan(&p.PersonID, &p.Name, &p.FirstMentionedAt, &p.LastMentionedAt, &p.MentionCount)
+	err := s.pool.QueryRow(ctx, `
+		WITH RECURSIVE chain(id, merged_into_person_id, depth, path) AS (
+			SELECT id, merged_into_person_id, 0, ARRAY[id] FROM people WHERE user_id=$1 AND id=$2
+			UNION ALL
+			SELECT next.id, next.merged_into_person_id, c.depth+1, c.path || next.id
+			FROM chain c JOIN people next ON next.id=c.merged_into_person_id AND next.user_id=$1
+			WHERE c.merged_into_person_id IS NOT NULL AND c.depth < 10 AND NOT next.id = ANY(c.path)
+		), target AS (
+			SELECT id FROM chain ORDER BY (merged_into_person_id IS NULL) DESC, depth DESC LIMIT 1
+		)
+		SELECT p.id,$2::bigint,p.name,p.first_name,p.last_name,p.job_title,p.team,p.company,p.notes,p.updated_at,p.merged_into_person_id,min(pn.created_at),max(pn.created_at),count(*)::int
+		FROM target t JOIN people p ON p.id=t.id AND p.user_id=$1
+		JOIN people_notes pn ON pn.person_id=p.id AND pn.user_id=p.user_id
+		GROUP BY p.id,p.name,p.first_name,p.last_name,p.job_title,p.team,p.company,p.notes,p.updated_at,p.merged_into_person_id
+	`, userID, personID).Scan(&p.PersonID, &p.RequestedPersonID, &p.Name, &p.FirstName, &p.LastName, &p.JobTitle, &p.Team, &p.Company, &p.Notes, &p.UpdatedAt, &p.MergedIntoPersonID, &p.FirstMentionedAt, &p.LastMentionedAt, &p.MentionCount)
 	if err != nil {
 		return p, err
 	}
-	p.Aliases, err = s.ListPersonAliases(ctx, userID, personID, aliasLimit+1)
+	p.CanonicalPersonID = p.PersonID
+	p.Aliases, err = s.ListPersonAliases(ctx, userID, p.PersonID, aliasLimit+1)
 	if err != nil {
 		return p, err
 	}
