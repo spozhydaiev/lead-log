@@ -392,54 +392,24 @@ func (s *Service) DailyAtDate(ctx context.Context, userID int64, sourceDate time
 }
 
 func (s *Service) Weekly(ctx context.Context, userID int64, refresh bool) (string, error) {
-	now := time.Now()
-	start := now.AddDate(0, 0, -7)
-	log := s.logger.With("operation", "weekly", "operation_id", logging.OperationID(ctx), "period_start", start.Format(time.RFC3339), "period_end", now.Format(time.RFC3339))
-	log.Info("weekly command started")
-
-	source, err := s.store.RecentWeeklySource(ctx, userID, start)
+	result, err := s.GenerateSummary(ctx, userID, SummaryGenerateInput{Type: "weekly", AnchorDate: time.Now(), Force: refresh})
 	if err != nil {
-		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "source loading", "operation", "weekly.load_source"}, err)...)
-		return "", fmt.Errorf("weekly.load_source: %w", err)
+		s.logger.Error("weekly failed", logging.WithSafeError([]any{"operation", "weekly.generate", "operation_id", logging.OperationID(ctx)}, err)...)
+		return "", fmt.Errorf("weekly.generate: %w", err)
 	}
-	if strings.TrimSpace(source) == "" {
-		log.Info("weekly source loaded", "note_count", 0)
+	if result.Reason == "no_source_notes" || result.Summary == nil {
 		return s.language.CommonMessages().NoNotesLast7Days, nil
 	}
-
-	year, week := now.ISOWeek()
-	scopeKey := scopedCacheKey(fmt.Sprintf("%d-W%02d", year, week), s.language)
-	sourceHash := utils.HashStrings(source)
-	noteCount := countSourceNotes(source)
-	log = log.With("note_count", noteCount)
-	log.Info("weekly source loaded")
-
-	if !refresh {
-		cached, err := s.store.GetCachedAgentResponse(ctx, userID, "weekly", scopeKey, sourceHash, PromptVersion)
-		if err != nil {
-			log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "cache lookup", "operation", "weekly.cache_lookup"}, err)...)
-			return "", fmt.Errorf("weekly.cache_lookup: %w", err)
-		}
-		if cached != nil {
-			log.Info("cache hit", "cache_hit", true)
-			return cached.ResponseText + "\n\n" + s.language.CommonMessages().WeeklyCachedNotice, nil
+	text := strings.TrimSpace(result.Summary.Preview)
+	if result.Summary.Content != nil {
+		if d, ok := result.Summary.Content.(models.WeeklyDigest); ok {
+			text = FormatWeeklyDigest(d)
 		}
 	}
-	log.Info("cache miss", "cache_hit", false)
-	log.Info("LLM call started", "operation", "weekly.llm_request")
-	response, err := s.llm.SummarizeWeekly(ctx, source)
-	if err != nil {
-		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "LLM request", "operation", "weekly.llm_request"}, err)...)
-		return "", fmt.Errorf("weekly.llm_request: %w", err)
+	if result.CacheHit {
+		text += "\n\n" + s.language.CommonMessages().WeeklyCachedNotice
 	}
-	log.Info("LLM call completed", "operation", "weekly.llm_request")
-
-	if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &now, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: response}); err != nil {
-		log.Error("weekly failed", logging.WithSafeError([]any{"failure_stage", "cache save", "operation", "weekly.cache_save"}, err)...)
-		return "", fmt.Errorf("weekly.cache_save: %w", err)
-	}
-	log.Info("cache save completed", "operation", "weekly.cache_save")
-	return response, nil
+	return text, nil
 }
 
 func formatParsedNote(noteID int64, p models.ParsedNote, language models.ResponseLanguage) string {

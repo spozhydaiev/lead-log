@@ -94,6 +94,13 @@ func main() {
 			os.Exit(1)
 		}
 		go dailyScheduler.Run(ctx)
+
+		weeklyScheduler, err := scheduler.NewWeeklySummary(service, telegramBot, cfg.AllowedTelegramUserIDs, cfg.DailySummaryTime, cfg.DailySummaryLocation, logger.With("component", "weekly_scheduler"))
+		if err != nil {
+			logger.Error("weekly summary scheduler initialization failed", logging.WithSafeError([]any{"component", "weekly_scheduler", "operation", "scheduler.init"}, err)...)
+			os.Exit(1)
+		}
+		go weeklyScheduler.Run(ctx)
 	}
 
 	botErr := make(chan error, 1)
