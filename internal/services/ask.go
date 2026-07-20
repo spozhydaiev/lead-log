@@ -13,6 +13,7 @@ import (
 
 	"github.com/spozhydaiev/lead-log/internal/logging"
 
+	"github.com/spozhydaiev/lead-log/internal/domain/periods"
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
 
@@ -327,15 +328,15 @@ func resolveAskDateRange(dr models.AskDateRange, now time.Time, loc *time.Locati
 		out.From = &from
 		out.To = &to
 	case models.AskDateCurrentWeek:
-		wd := (int(t.Weekday()) + 6) % 7
-		from := midnight.AddDate(0, 0, -wd)
+		week := periods.ResolveContainingWeek(t, loc)
+		from := week.Start
 		to := t
 		out.From = &from
 		out.To = &to
 	case models.AskDatePreviousWeek:
-		wd := (int(t.Weekday()) + 6) % 7
-		to := midnight.AddDate(0, 0, -wd)
-		from := to.AddDate(0, 0, -7)
+		week := periods.ResolvePreviousCompletedWeek(t, loc)
+		from := week.Start
+		to := week.ExclusiveEnd
 		out.From = &from
 		out.To = &to
 	case models.AskDateLast7Days:

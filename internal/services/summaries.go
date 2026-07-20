@@ -11,6 +11,7 @@ import (
 
 	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
+	"github.com/spozhydaiev/lead-log/internal/domain/periods"
 	"github.com/spozhydaiev/lead-log/internal/logging"
 	"github.com/spozhydaiev/lead-log/internal/models"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
@@ -178,13 +179,8 @@ func (s *Service) summaryPeriod(kind string, anchor time.Time) (time.Time, time.
 		return st, st.AddDate(0, 0, 1), st.Format("2006-01-02"), nil
 	}
 	if kind == "weekly" {
-		wd := int(d.Weekday())
-		if wd == 0 {
-			wd = 7
-		}
-		st := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -wd+1)
-		y, w := st.ISOWeek()
-		return st, st.AddDate(0, 0, 7), fmt.Sprintf("%d-W%02d", y, w), nil
+		w := periods.ResolveContainingWeek(d, loc)
+		return w.Start, w.ExclusiveEnd, w.ScopeKey, nil
 	}
 	return time.Time{}, time.Time{}, "", fmt.Errorf("invalid summary type")
 }

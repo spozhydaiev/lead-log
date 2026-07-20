@@ -17,10 +17,11 @@ func TestNextWeeklyRunMondayMorning(t *testing.T) {
 	}
 }
 
-func TestPreviousCompletedWeekAnchorForMondayRun(t *testing.T) {
+func TestPreviousCompletedWeekForMondayRun(t *testing.T) {
 	loc := mustWarsaw(t)
-	got := previousCompletedWeekAnchor(time.Date(2026, 7, 20, 8, 45, 0, 0, loc), loc)
-	assertDate(t, got, "2026-07-19")
+	got := previousCompletedWeek(time.Date(2026, 7, 20, 8, 45, 0, 0, loc), loc)
+	assertDate(t, got.Start, "2026-07-13")
+	assertDate(t, got.EndDate, "2026-07-19")
 }
 
 func TestWeeklySchedulerGeneratesOnceAndTelegramFailureDoesNotUndo(t *testing.T) {
@@ -41,7 +42,7 @@ func TestWeeklySchedulerGeneratesOnceAndTelegramFailureDoesNotUndo(t *testing.T)
 	if sender.sent != 1 {
 		t.Fatalf("send attempts=%d", sender.sent)
 	}
-	if svc.lastAnchor.Format("2006-01-02") != "2026-07-19" {
+	if svc.lastAnchor.Format("2006-01-02") != "2026-07-13" {
 		t.Fatalf("anchor=%s", svc.lastAnchor.Format("2006-01-02"))
 	}
 }
