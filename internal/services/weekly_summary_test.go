@@ -63,3 +63,60 @@ func TestWeeklyOrdinaryLegacyTextRemainsText(t *testing.T) {
 		t.Fatalf("content=%#v", content)
 	}
 }
+
+func TestSummaryPeriodDTOWarsawSummerUsesLocalCalendarDates(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Warsaw")
+	start := time.Date(2026, 7, 12, 22, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 19, 22, 0, 0, 0, time.UTC)
+	got := summaryPeriodDTO(start, end, loc)
+	if got.From != "2026-07-13" || got.To != "2026-07-19" {
+		t.Fatalf("period=%#v want 2026-07-13..2026-07-19", got)
+	}
+}
+
+func TestMapSummaryWeeklyTitleUsesLocalCalendarDates(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Warsaw")
+	start := time.Date(2026, 7, 12, 22, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 19, 22, 0, 0, 0, time.UTC)
+	r := models.AgentResponse{ID: 9, Kind: "weekly", PeriodStart: &start, PeriodEnd: &end, CreatedAt: time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)}
+	v := (&Service{}).mapSummary(t.Context(), 7, r, false, loc)
+	if v.Period.From != "2026-07-13" || v.Period.To != "2026-07-19" {
+		t.Fatalf("period=%#v", v.Period)
+	}
+	want := "Weekly summary for 2026-07-13 to 2026-07-19"
+	if v.Title != want {
+		t.Fatalf("title=%q want %q", v.Title, want)
+	}
+}
+
+func TestSummaryPeriodDTOTimezonesAndDST(t *testing.T) {
+	cases := []struct {
+		name       string
+		tz         string
+		start, end time.Time
+		from, to   string
+	}{
+		{"warsaw winter", "Europe/Warsaw", time.Date(2026, 1, 4, 23, 0, 0, 0, time.UTC), time.Date(2026, 1, 11, 23, 0, 0, 0, time.UTC), "2026-01-05", "2026-01-11"},
+		{"warsaw dst transition", "Europe/Warsaw", time.Date(2026, 3, 22, 23, 0, 0, 0, time.UTC), time.Date(2026, 3, 29, 22, 0, 0, 0, time.UTC), "2026-03-23", "2026-03-29"},
+		{"utc", "UTC", time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC), time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC), "2026-07-13", "2026-07-19"},
+		{"west of utc", "America/New_York", time.Date(2026, 7, 13, 4, 0, 0, 0, time.UTC), time.Date(2026, 7, 20, 4, 0, 0, 0, time.UTC), "2026-07-13", "2026-07-19"},
+	}
+	for _, tc := range cases {
+		loc, err := time.LoadLocation(tc.tz)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := summaryPeriodDTO(tc.start, tc.end, loc)
+		if got.From != tc.from || got.To != tc.to {
+			t.Fatalf("%s period=%#v want %s..%s", tc.name, got, tc.from, tc.to)
+		}
+	}
+}
+
+func TestSummaryLocationInvalidTimezoneFallsBack(t *testing.T) {
+	fallback, _ := time.LoadLocation("Europe/Warsaw")
+	got := (&Service{dailyLocation: fallback}).summaryLocation("not/a-zone")
+	if got.String() != "Europe/Warsaw" {
+		t.Fatalf("location=%s", got)
+	}
+}

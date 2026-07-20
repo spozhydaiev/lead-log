@@ -23,6 +23,7 @@ var summaryLocks sync.Map
 type SummaryFilter struct {
 	Type, Status string
 	From, To     *time.Time
+	Timezone     string
 }
 type SummaryCursor struct {
 	PeriodEnd time.Time
@@ -34,6 +35,7 @@ type SummaryGenerateInput struct {
 	Type       string
 	AnchorDate time.Time
 	Force      bool
+	Timezone   string
 }
 type SummaryGenerateResult struct {
 	Generated bool          `json:"generated"`
@@ -67,22 +69,23 @@ type SummarySource struct {
 }
 
 func (s *Service) ListSummaries(ctx context.Context, userID int64, f SummaryFilter, limit int, c *SummaryCursor) (SummaryListView, error) {
-	rows, err := s.store.ListSummaries(ctx, userID, store.SummaryListFilter{Type: f.Type, Status: f.Status, From: f.From, To: f.To}, limit, storeSummaryCursor(c))
+	loc := s.summaryLocation(f.Timezone)
+	rows, err := s.store.ListSummaries(ctx, userID, store.SummaryListFilter{Type: f.Type, Status: f.Status, From: f.From, To: f.To, Timezone: loc.String()}, limit, storeSummaryCursor(c))
 	if err != nil {
 		return SummaryListView{}, err
 	}
 	out := SummaryListView{Items: []SummaryView{}}
 	for _, r := range rows {
-		out.Items = append(out.Items, s.mapSummary(ctx, userID, r, false))
+		out.Items = append(out.Items, s.mapSummary(ctx, userID, r, false, loc))
 	}
 	return out, nil
 }
-func (s *Service) GetSummary(ctx context.Context, userID, id int64) (SummaryView, error) {
+func (s *Service) GetSummary(ctx context.Context, userID, id int64, timezone string) (SummaryView, error) {
 	r, err := s.store.GetSummary(ctx, userID, id)
 	if err != nil {
 		return SummaryView{}, err
 	}
-	return s.mapSummary(ctx, userID, r, true), nil
+	return s.mapSummary(ctx, userID, r, true, s.summaryLocation(timezone)), nil
 }
 func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryGenerateInput) (SummaryGenerateResult, error) {
 	if s.summaryGenerationTimeout > 0 {
@@ -91,11 +94,12 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 		defer cancel()
 	}
 	started := time.Now()
-	start, end, scope, err := s.summaryPeriod(in.Type, in.AnchorDate)
+	loc := s.summaryLocation(in.Timezone)
+	start, end, scope, err := s.summaryPeriodInLocation(in.Type, in.AnchorDate, loc)
 	if err != nil {
 		return SummaryGenerateResult{}, err
 	}
-	period := SummaryPeriod{From: start.Format("2006-01-02"), To: end.Add(-time.Nanosecond).Format("2006-01-02")}
+	period := summaryPeriodDTO(start, end, loc)
 	lockKey := fmt.Sprintf("%d:%s:%s:%s", userID, in.Type, scope, s.language)
 	muIface, _ := summaryLocks.LoadOrStore(lockKey, &sync.Mutex{})
 	mu := muIface.(*sync.Mutex)
@@ -117,7 +121,7 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 		if cached, err := s.store.GetCachedAgentResponse(ctx, userID, in.Type, scopeKey, sourceHash, PromptVersion); err != nil {
 			return SummaryGenerateResult{}, err
 		} else if cached != nil {
-			v := s.mapSummary(ctx, userID, *cached, true)
+			v := s.mapSummary(ctx, userID, *cached, true, loc)
 			return SummaryGenerateResult{Generated: false, CacheHit: true, Period: period, Summary: &v}, nil
 		}
 	}
@@ -159,7 +163,7 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 	if cached == nil {
 		return SummaryGenerateResult{}, fmt.Errorf("generated summary missing")
 	}
-	v := s.mapSummary(ctx, userID, *cached, true)
+	v := s.mapSummary(ctx, userID, *cached, true, loc)
 	return SummaryGenerateResult{Generated: true, CacheHit: false, Period: period, Summary: &v}, nil
 }
 func storeSummaryCursor(c *SummaryCursor) *store.SummaryCursor {
@@ -169,10 +173,9 @@ func storeSummaryCursor(c *SummaryCursor) *store.SummaryCursor {
 	return &store.SummaryCursor{PeriodEnd: c.PeriodEnd, Kind: c.Kind, ID: c.ID}
 }
 func (s *Service) summaryPeriod(kind string, anchor time.Time) (time.Time, time.Time, string, error) {
-	loc := s.dailyLocation
-	if loc == nil {
-		loc = time.Local
-	}
+	return s.summaryPeriodInLocation(kind, anchor, s.summaryLocation(""))
+}
+func (s *Service) summaryPeriodInLocation(kind string, anchor time.Time, loc *time.Location) (time.Time, time.Time, string, error) {
 	d := anchor.In(loc)
 	if kind == "daily" {
 		st := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, loc)
@@ -184,6 +187,33 @@ func (s *Service) summaryPeriod(kind string, anchor time.Time) (time.Time, time.
 	}
 	return time.Time{}, time.Time{}, "", fmt.Errorf("invalid summary type")
 }
+
+func (s *Service) summaryLocation(timezone string) *time.Location {
+	if strings.TrimSpace(timezone) != "" {
+		if loc, err := time.LoadLocation(timezone); err == nil {
+			return loc
+		}
+	}
+	if s.dailyLocation != nil {
+		return s.dailyLocation
+	}
+	return time.Local
+}
+
+func summaryPeriodDTOFromPointers(start, end *time.Time, loc *time.Location) SummaryPeriod {
+	from, to := "", ""
+	if start != nil {
+		from = start.In(loc).Format("2006-01-02")
+	}
+	if end != nil {
+		to = end.In(loc).AddDate(0, 0, -1).Format("2006-01-02")
+	}
+	return SummaryPeriod{From: from, To: to}
+}
+
+func summaryPeriodDTO(start, end time.Time, loc *time.Location) SummaryPeriod {
+	return summaryPeriodDTOFromPointers(&start, &end, loc)
+}
 func (s *Service) summarySource(ctx context.Context, userID int64, kind string, start, end time.Time) (string, error) {
 	if kind == "daily" {
 		return s.store.RecentDailySource(ctx, userID, start, end)
@@ -193,15 +223,10 @@ func (s *Service) summarySource(ctx context.Context, userID int64, kind string, 
 	}
 	return "", fmt.Errorf("invalid summary type")
 }
-func (s *Service) mapSummary(ctx context.Context, userID int64, r models.AgentResponse, detail bool) SummaryView {
-	from, to := "", ""
-	if r.PeriodStart != nil {
-		from = r.PeriodStart.Format("2006-01-02")
-	}
-	if r.PeriodEnd != nil {
-		to = r.PeriodEnd.Add(-time.Nanosecond).Format("2006-01-02")
-	}
-	v := SummaryView{ID: fmt.Sprintf("summary_%d", r.ID), Type: r.Kind, Status: "ready", Period: SummaryPeriod{From: from, To: to}, GeneratedAt: r.CreatedAt, Title: summaryTitle(r.Kind, from, to), Preview: summaryPreview(r)}
+func (s *Service) mapSummary(ctx context.Context, userID int64, r models.AgentResponse, detail bool, loc *time.Location) SummaryView {
+	period := summaryPeriodDTOFromPointers(r.PeriodStart, r.PeriodEnd, loc)
+	from, to := period.From, period.To
+	v := SummaryView{ID: fmt.Sprintf("summary_%d", r.ID), Type: r.Kind, Status: "ready", Period: period, GeneratedAt: r.CreatedAt, Title: summaryTitle(r.Kind, from, to), Preview: summaryPreview(r)}
 	if detail {
 		v.Content = summaryContent(r)
 		v.Sources = s.summarySources(ctx, userID, r)
@@ -269,6 +294,7 @@ func FormatWeeklyDigest(d models.WeeklyDigest) string {
 	}
 	return "Weekly summary generated."
 }
+
 func (s *Service) summarySources(ctx context.Context, userID int64, r models.AgentResponse) []SummarySource {
 	ids := sourceIDs(r)
 	if len(ids) == 0 {
