@@ -1746,6 +1746,7 @@ func (s *Store) RecentDecisionsForTicket(ctx context.Context, userID int64, key 
 type SummaryListFilter struct {
 	Type, Status string
 	From, To     *time.Time
+	Timezone     string
 }
 type SummaryCursor struct {
 	PeriodEnd time.Time
@@ -1768,11 +1769,11 @@ func (s *Store) ListSummaries(ctx context.Context, userID int64, f SummaryListFi
 		  AND kind IN ('daily','weekly')
 		  AND ($2='' OR kind=$2)
 		  AND ($3='' OR $3='ready')
-		  AND ($4::date IS NULL OR (period_end AT TIME ZONE 'UTC')::date >= $4::date)
-		  AND ($5::date IS NULL OR (period_start AT TIME ZONE 'UTC')::date <= $5::date)
+		  AND ($4::date IS NULL OR ((period_end AT TIME ZONE NULLIF($10,''))::date - 1) >= $4::date)
+		  AND ($5::date IS NULL OR (period_start AT TIME ZONE NULLIF($10,''))::date <= $5::date)
 		  AND ($6::timestamptz IS NULL OR (period_end,kind,id) < ($6,$7,$8))
 		ORDER BY period_end DESC, kind DESC, id DESC
-		LIMIT $9`, userID, f.Type, f.Status, f.From, f.To, summaryCursorTime(c), summaryCursorKind(c), summaryCursorID(c), limit)
+		LIMIT $9`, userID, f.Type, f.Status, f.From, f.To, summaryCursorTime(c), summaryCursorKind(c), summaryCursorID(c), limit, f.Timezone)
 	if err != nil {
 		return nil, err
 	}

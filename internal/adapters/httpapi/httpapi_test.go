@@ -129,7 +129,7 @@ func (f *fakeService) ListTickets(context.Context, int64, services.TicketsListFi
 func (f *fakeService) ListSummaries(context.Context, int64, services.SummaryFilter, int, *services.SummaryCursor) (services.SummaryListView, error) {
 	return f.summaries, nil
 }
-func (f *fakeService) GetSummary(_ context.Context, _ int64, id int64) (services.SummaryView, error) {
+func (f *fakeService) GetSummary(_ context.Context, _ int64, id int64, _ string) (services.SummaryView, error) {
 	if id == 404 {
 		return services.SummaryView{}, pgx.ErrNoRows
 	}

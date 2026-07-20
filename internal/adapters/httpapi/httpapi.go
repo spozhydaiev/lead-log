@@ -62,7 +62,7 @@ type Service interface {
 	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
 	AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error)
 	ListSummaries(context.Context, int64, services.SummaryFilter, int, *services.SummaryCursor) (services.SummaryListView, error)
-	GetSummary(context.Context, int64, int64) (services.SummaryView, error)
+	GetSummary(context.Context, int64, int64, string) (services.SummaryView, error)
 	GenerateSummary(context.Context, int64, services.SummaryGenerateInput) (services.SummaryGenerateResult, error)
 }
 type Pinger interface{ Ping(context.Context) error }
@@ -483,7 +483,7 @@ func mapPreviewNote(n services.TodayNote) dto.TodayNote {
 
 func (a *API) summaries(w http.ResponseWriter, r *http.Request) {
 	p, _ := principal(r)
-	limit, filter, hash, cursor, ok := summariesPage(r)
+	limit, filter, hash, cursor, ok := summariesPage(r, p.Timezone)
 	if !ok {
 		validation(w, r)
 		return
@@ -507,7 +507,7 @@ func (a *API) summaryDetail(w http.ResponseWriter, r *http.Request) {
 		validation(w, r)
 		return
 	}
-	v, err := a.service.GetSummary(r.Context(), p.UserID, id)
+	v, err := a.service.GetSummary(r.Context(), p.UserID, id, p.Timezone)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, 404, "not_found", "The resource was not found.")
 		return
@@ -547,7 +547,7 @@ func (a *API) generateSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.SummaryGenerationTimeout)
 	defer cancel()
-	out, err := a.service.GenerateSummary(ctx, p.UserID, services.SummaryGenerateInput{Type: in.Type, AnchorDate: d, Force: in.Force})
+	out, err := a.service.GenerateSummary(ctx, p.UserID, services.SummaryGenerateInput{Type: in.Type, AnchorDate: d, Force: in.Force, Timezone: p.Timezone})
 	if err != nil {
 		code, status := summaryErrorCode(err)
 		if code == "client_cancelled" {
@@ -572,7 +572,7 @@ type summariesCursor struct {
 	Version    int       `json:"v"`
 }
 
-func summariesPage(r *http.Request) (int, services.SummaryFilter, string, *services.SummaryCursor, bool) {
+func summariesPage(r *http.Request, timezone string) (int, services.SummaryFilter, string, *services.SummaryCursor, bool) {
 	q := r.URL.Query()
 	limit := 20
 	if raw := q.Get("limit"); raw != "" {
@@ -582,7 +582,7 @@ func summariesPage(r *http.Request) (int, services.SummaryFilter, string, *servi
 		}
 		limit = v
 	}
-	f := services.SummaryFilter{}
+	f := services.SummaryFilter{Timezone: timezone}
 	if typ := q.Get("type"); typ != "" {
 		if typ != "daily" && typ != "weekly" {
 			return 0, f, "", nil, false
