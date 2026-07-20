@@ -27,6 +27,7 @@ type fakeService struct {
 	registeredUser   store.CurrentUser
 	people           services.PeopleListView
 	person           services.PersonWorkspaceView
+	updateErr        error
 	tickets          services.TicketsListView
 	ticket           services.TicketWorkspaceView
 	ticketErr        error
@@ -115,6 +116,15 @@ func (f *fakeService) GetNoteDetail(context.Context, int64, int64) (services.Not
 }
 func (f *fakeService) ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error) {
 	return f.people, nil
+}
+func (f *fakeService) UpdatePersonProfile(_ context.Context, _ int64, id int64, _ services.UpdatePersonProfileInput) (store.PersonProfile, error) {
+	if id == 404 {
+		return store.PersonProfile{}, pgx.ErrNoRows
+	}
+	if f.updateErr != nil {
+		return store.PersonProfile{}, f.updateErr
+	}
+	return f.person.Person, nil
 }
 func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (services.PersonWorkspaceView, error) {
 	if id == 404 {
@@ -576,3 +586,42 @@ func TestGenerateSummaryUsesConfiguredSummaryTimeout(t *testing.T) {
 		t.Fatalf("generate deadline = %v, want summary-specific timeout near 90s", svc.generateDeadline)
 	}
 }
+
+func TestPatchPersonProfileHTTP(t *testing.T) {
+	updated := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, person: services.PersonWorkspaceView{Person: store.PersonProfile{PersonID: 12, Name: "Adlet Kairbekov", Aliases: []string{"Adlet"}, FirstName: strPtr("Adlet"), UpdatedAt: updated, FirstMentionedAt: updated, LastMentionedAt: updated, MentionCount: 1}}}
+	h := New(svc, &pinger{}, Config{AllowedOrigins: []string{"http://localhost:3000"}, SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "PATCH", "/api/v1/people/person_12", `{"display_name":"Adlet Kairbekov","first_name":"Adlet","aliases":["Adlet"]}`, "top-secret-token")
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q", got)
+	}
+	if !strings.Contains(w.Body.String(), `"display_name":"Adlet Kairbekov"`) || !strings.Contains(w.Body.String(), `"updated_at"`) {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if w := request(h, "PATCH", "/api/v1/people/bad", `{}`, "top-secret-token"); w.Code != 400 {
+		t.Fatalf("bad id status=%d", w.Code)
+	}
+	if w := request(h, "PATCH", "/api/v1/people/person_12", `{}`, ""); w.Code != 401 {
+		t.Fatalf("unauth status=%d", w.Code)
+	}
+}
+
+func TestPatchPersonProfileHTTPConflictAndSafeLogs(t *testing.T) {
+	var logs bytes.Buffer
+	svc := &fakeService{user: store.WebUser{ID: 7}, updateErr: services.ErrPersonIdentityConflict}
+	h := New(svc, &pinger{}, Config{AllowedOrigins: []string{"http://localhost:3000"}, SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	w := request(h, "PATCH", "/api/v1/people/person_12", `{"display_name":"Secret Name","notes":"Secret notes","aliases":["Secret Alias"]}`, "top-secret-token")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "person_identity_conflict") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, leak := range []string{"Secret Name", "Secret notes", "Secret Alias"} {
+		if strings.Contains(logs.String(), leak) {
+			t.Fatalf("log leaked %q: %s", leak, logs.String())
+		}
+	}
+}
+
+func strPtr(s string) *string { return &s }

@@ -146,6 +146,16 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      description: Edit the authenticated user's active person profile without running an LLM. Omitted fields preserve existing values; nullable profile fields set to null are cleared. Supplying aliases replaces the desired user-visible alias set; an empty array removes removable aliases while preserving canonical identity resolution. Changing display_name preserves the previous display name as an alias. Exact normalized display-name and alias conflicts with another active person return 409; no fuzzy or transliteration matching is performed. Profile notes are private user-entered data; historical notes and summaries are not rewritten. Responses include Cache-Control no-store.
+      parameters: [{name: id, in: path, required: true, schema: {type: string, pattern: '^person_[1-9][0-9]*$'}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PersonProfileUpdateRequest'}}}}
+      responses:
+        '200': {description: Updated owner-scoped person profile, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/PersonProfile'}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Stale expected_updated_at or exact identity conflict, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
   /api/v1/ask:
     post:
       description: Answers a private work-memory question using bounded retrieval from the authenticated user's persisted Lead Log records only. The service does not send entire history to the LLM, does not expose model or prompt settings, validates citations against retrieved records, returns public IDs only, and returns Cache-Control no-store. Time expressions use the authenticated user's stored timezone; optional timezone and response_language request fields are accepted for forward compatibility but not trusted over the user profile.
@@ -255,6 +265,19 @@ components:
     TicketProfile: {type: object, required: [key, first_mentioned_at, last_mentioned_at, mention_count], properties: {key: {type: string, example: CH-1234}, first_mentioned_at: {type: string, format: date-time}, last_mentioned_at: {type: string, format: date-time}, mention_count: {type: integer}}}
     TicketWorkspaceDetail: {type: object, required: [ticket, open_actions, recent_decisions, recent_notes, page], properties: {ticket: {$ref: '#/components/schemas/TicketProfile'}, open_actions: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/Action'}}, recent_decisions: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/Decision'}}, recent_notes: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/TicketRecentNote'}}, page: {$ref: '#/components/schemas/NotesPage'}}}
     TicketWorkspaceEnvelope: {type: object, required: [data], properties: {data: {$ref: '#/components/schemas/TicketWorkspaceDetail'}}}
+    PersonProfileUpdateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200, description: Trimmed and normalized for exact identity ownership; cannot be null.}
+        first_name: {type: string, nullable: true, maxLength: 200}
+        last_name: {type: string, nullable: true, maxLength: 200}
+        job_title: {type: string, nullable: true, maxLength: 200}
+        team: {type: string, nullable: true, maxLength: 200}
+        company: {type: string, nullable: true, maxLength: 200}
+        notes: {type: string, nullable: true, maxLength: 10000, description: Private user-entered profile notes; never logged and not searched in this task.}
+        aliases: {type: array, maxItems: 25, items: {type: string, minLength: 1, maxLength: 200}, description: Replacement user-visible alias set; omitted preserves existing aliases and [] removes removable aliases while canonical identity remains.}
+        expected_updated_at: {type: string, format: date-time, description: Optional optimistic concurrency token; stale values return person_update_conflict.}
     PersonProfile: {type: object, required: [id, display_name, aliases, first_mentioned_at, last_mentioned_at, mention_count], properties: {id: {type: string, example: person_12}, display_name: {type: string}, aliases: {type: array, maxItems: 10, items: {type: string}}, first_name: {type: string, nullable: true}, last_name: {type: string, nullable: true}, job_title: {type: string, nullable: true}, team: {type: string, nullable: true}, company: {type: string, nullable: true}, notes: {type: string, nullable: true}, updated_at: {type: string, format: date-time}, merged_into_person_id: {type: string, nullable: true, example: person_12}, requested_person_id: {type: string, example: person_99}, canonical_person_id: {type: string, example: person_12}, first_mentioned_at: {type: string, format: date-time}, last_mentioned_at: {type: string, format: date-time}, mention_count: {type: integer}}}
     PersonWorkspaceDetail: {type: object, required: [person, open_actions, recent_decisions, recent_notes, page], properties: {person: {$ref: '#/components/schemas/PersonProfile'}, open_actions: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/Action'}}, recent_decisions: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/Decision'}}, recent_notes: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/PeopleRecentNote'}}, page: {$ref: '#/components/schemas/NotesPage'}}}
     AskRequest: {type: object, additionalProperties: false, required: [question], properties: {question: {type: string, minLength: 2, maxLength: 1500}, timezone: {type: [string, 'null'], description: Reserved; authenticated user timezone is authoritative.}, response_language: {type: [string, 'null'], description: Reserved; authenticated user response language policy is authoritative.}}}
