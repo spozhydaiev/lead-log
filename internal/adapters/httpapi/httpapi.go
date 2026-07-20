@@ -61,6 +61,9 @@ type Service interface {
 	ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error)
 	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
 	AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error)
+	ListSummaries(context.Context, int64, services.SummaryFilter, int, *services.SummaryCursor) (services.SummaryListView, error)
+	GetSummary(context.Context, int64, int64) (services.SummaryView, error)
+	GenerateSummary(context.Context, int64, services.SummaryGenerateInput) (services.SummaryGenerateResult, error)
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
@@ -117,6 +120,9 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
 	mux.Handle("POST /api/v1/ask", a.auth(http.HandlerFunc(a.ask)))
+	mux.Handle("GET /api/v1/summaries", a.auth(http.HandlerFunc(a.summaries)))
+	mux.Handle("GET /api/v1/summaries/{id}", a.auth(http.HandlerFunc(a.summaryDetail)))
+	mux.Handle("POST /api/v1/summaries/generate", a.auth(http.HandlerFunc(a.generateSummary)))
 	mux.Handle("PATCH /api/v1/actions/{id}", a.auth(http.HandlerFunc(a.patchAction)))
 	return a.middleware(mux)
 }
@@ -469,6 +475,182 @@ func mapPreviewNote(n services.TodayNote) dto.TodayNote {
 		}
 	}
 	return x
+}
+
+func (a *API) summaries(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	limit, filter, hash, cursor, ok := summariesPage(r)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.ListSummaries(r.Context(), p.UserID, filter, limit+1, cursor)
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	hasMore := len(v.Items) > limit
+	next := nextCursorSummaries(v.Items, limit, hash)
+	if hasMore {
+		v.Items = v.Items[:limit]
+	}
+	writeJSON(w, 200, map[string]any{"data": map[string]any{"items": v.Items, "page": map[string]any{"next_cursor": next, "has_more": hasMore}}})
+}
+func (a *API) summaryDetail(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	id, ok := parsePublicID(r.PathValue("id"), "summary")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	v, err := a.service.GetSummary(r.Context(), p.UserID, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if err != nil {
+		internal(w, r)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": map[string]any{"summary": v}})
+}
+func (a *API) generateSummary(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeError(w, r, 415, "unsupported_media_type", "Content-Type must be application/json.")
+		return
+	}
+	var in struct {
+		Type       string `json:"type"`
+		AnchorDate string `json:"anchor_date"`
+		Force      bool   `json:"force"`
+	}
+	if decode(w, r, &in) != "" {
+		return
+	}
+	if in.Type != "daily" && in.Type != "weekly" {
+		validation(w, r)
+		return
+	}
+	loc, err := time.LoadLocation(p.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	d, ok := parseLocalDate(in.AnchorDate, loc)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 55*time.Second)
+	defer cancel()
+	out, err := a.service.GenerateSummary(ctx, p.UserID, services.SummaryGenerateInput{Type: in.Type, AnchorDate: d, Force: in.Force})
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, r, 504, "timeout", "The request timed out.")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 503, "summary_generation_failed", "Summary generation is temporarily unavailable.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+type summariesCursor struct {
+	PeriodEnd  time.Time `json:"period_end"`
+	Kind       string    `json:"kind"`
+	ID         int64     `json:"id"`
+	FilterHash string    `json:"filter_hash"`
+	Version    int       `json:"v"`
+}
+
+func summariesPage(r *http.Request) (int, services.SummaryFilter, string, *services.SummaryCursor, bool) {
+	q := r.URL.Query()
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		v, e := strconv.Atoi(raw)
+		if e != nil || v < 1 || v > 50 {
+			return 0, services.SummaryFilter{}, "", nil, false
+		}
+		limit = v
+	}
+	f := services.SummaryFilter{}
+	if typ := q.Get("type"); typ != "" {
+		if typ != "daily" && typ != "weekly" {
+			return 0, f, "", nil, false
+		}
+		f.Type = typ
+	}
+	if st := q.Get("status"); st != "" {
+		if st != "ready" {
+			return 0, f, "", nil, false
+		}
+		f.Status = st
+	}
+	if raw := q.Get("from"); raw != "" {
+		d, ok := parseLocalDate(raw, time.UTC)
+		if !ok {
+			return 0, f, "", nil, false
+		}
+		f.From = &d
+	}
+	if raw := q.Get("to"); raw != "" {
+		d, ok := parseLocalDate(raw, time.UTC)
+		if !ok {
+			return 0, f, "", nil, false
+		}
+		f.To = &d
+	}
+	if f.From != nil && f.To != nil && f.From.After(*f.To) {
+		return 0, f, "", nil, false
+	}
+	h := summariesFilterHash(f)
+	var c *services.SummaryCursor
+	if raw := q.Get("cursor"); raw != "" {
+		b, e := base64.RawURLEncoding.DecodeString(raw)
+		if e != nil {
+			return 0, f, "", nil, false
+		}
+		var sc summariesCursor
+		if json.Unmarshal(b, &sc) != nil || sc.Version != 1 || sc.ID <= 0 || sc.PeriodEnd.IsZero() || sc.FilterHash != h || (sc.Kind != "daily" && sc.Kind != "weekly") {
+			return 0, f, "", nil, false
+		}
+		c = &services.SummaryCursor{PeriodEnd: sc.PeriodEnd, Kind: sc.Kind, ID: sc.ID}
+	}
+	return limit, f, h, c, true
+}
+func summariesFilterHash(f services.SummaryFilter) string {
+	parts := []string{"v1", f.Type, f.Status}
+	if f.From != nil {
+		parts = append(parts, f.From.Format("2006-01-02"))
+	} else {
+		parts = append(parts, "")
+	}
+	if f.To != nil {
+		parts = append(parts, f.To.Format("2006-01-02"))
+	} else {
+		parts = append(parts, "")
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+func nextCursorSummaries(v []services.SummaryView, l int, h string) *string {
+	if len(v) <= l {
+		return nil
+	}
+	x := v[l-1]
+	pe, _ := time.Parse(time.RFC3339Nano, x.GeneratedAt.Format(time.RFC3339Nano)) // fallback overwritten below
+	if x.Period.To != "" {
+		if d, err := time.Parse("2006-01-02", x.Period.To); err == nil {
+			pe = d.AddDate(0, 0, 1)
+		}
+	}
+	b, _ := json.Marshal(summariesCursor{PeriodEnd: pe, Kind: x.Type, ID: mustSummaryID(x.ID), FilterHash: h, Version: 1})
+	s := base64.RawURLEncoding.EncodeToString(b)
+	return &s
+}
+func mustSummaryID(id string) int64 {
+	v, _ := strconv.ParseInt(strings.TrimPrefix(id, "summary_"), 10, 64)
+	return v
 }
 
 func (a *API) ask(w http.ResponseWriter, r *http.Request) {

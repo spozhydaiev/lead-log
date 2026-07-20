@@ -32,6 +32,9 @@ type fakeService struct {
 	ticketErr      error
 	askResp        services.AskResponse
 	askErr         error
+	summaries      services.SummaryListView
+	summary        services.SummaryView
+	generateResp   services.SummaryGenerateResult
 }
 
 func (f *fakeService) Register(_ context.Context, in services.RegisterInput, _ services.AuthConfig) (services.AuthSession, error) {
@@ -121,6 +124,23 @@ func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (
 func (f *fakeService) ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error) {
 	return f.tickets, nil
 }
+
+func (f *fakeService) ListSummaries(context.Context, int64, services.SummaryFilter, int, *services.SummaryCursor) (services.SummaryListView, error) {
+	return f.summaries, nil
+}
+func (f *fakeService) GetSummary(_ context.Context, _ int64, id int64) (services.SummaryView, error) {
+	if id == 404 {
+		return services.SummaryView{}, pgx.ErrNoRows
+	}
+	if f.summary.ID != "" {
+		return f.summary, nil
+	}
+	return services.SummaryView{}, pgx.ErrNoRows
+}
+func (f *fakeService) GenerateSummary(context.Context, int64, services.SummaryGenerateInput) (services.SummaryGenerateResult, error) {
+	return f.generateResp, nil
+}
+
 func (f *fakeService) AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error) {
 	if f.askErr != nil {
 		return services.AskResponse{}, f.askErr
@@ -507,5 +527,35 @@ func TestAskEndpointValidationAndSuccess(t *testing.T) {
 	w = request(h, "POST", "/api/v1/ask", `{"question":"ok"}`, "")
 	if w.Code != 401 {
 		t.Fatalf("unauthenticated got %d", w.Code)
+	}
+}
+
+func TestSummariesAPI(t *testing.T) {
+	now := time.Date(2026, 7, 19, 18, 0, 4, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, summaries: services.SummaryListView{Items: []services.SummaryView{{ID: "summary_123", Type: "daily", Status: "ready", Period: services.SummaryPeriod{From: "2026-07-19", To: "2026-07-19"}, Title: "Daily summary for 2026-07-19", Preview: strings.Repeat("x", 10), GeneratedAt: now}}}, summary: services.SummaryView{ID: "summary_123", Type: "daily", Status: "ready", Period: services.SummaryPeriod{From: "2026-07-19", To: "2026-07-19"}, GeneratedAt: now, Content: map[string]any{"short_summary": "ok"}, Sources: []services.SummarySource{}}, generateResp: services.SummaryGenerateResult{Generated: false, CacheHit: false, Reason: "no_source_notes", Period: services.SummaryPeriod{From: "2026-07-19", To: "2026-07-19"}}}
+	h := New(svc, nil, Config{AllowedOrigins: []string{"http://localhost:3000"}, Now: func() time.Time { return now }, SessionCookieName: "lead_log_session"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "GET", "/api/v1/summaries?type=daily&limit=20&from=2026-07-01&to=2026-07-31&status=ready", "", "top-secret-token")
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), `"id":"summary_123"`) {
+		t.Fatalf("list failed: code=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, path := range []string{"/api/v1/summaries?type=monthly", "/api/v1/summaries?status=failed", "/api/v1/summaries?from=2026-07-31&to=2026-07-01", "/api/v1/summaries?cursor=bad"} {
+		if w := request(h, "GET", path, "", "top-secret-token"); w.Code != 400 {
+			t.Fatalf("expected bad request for %s, got %d", path, w.Code)
+		}
+	}
+	if w := request(h, "GET", "/api/v1/summaries/summary_123", "", "top-secret-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"short_summary":"ok"`) {
+		t.Fatalf("detail failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(h, "GET", "/api/v1/summaries/summary_404", "", "top-secret-token"); w.Code != 404 {
+		t.Fatalf("missing detail got %d", w.Code)
+	}
+	r := httptest.NewRequest("POST", "/api/v1/summaries/generate", strings.NewReader(`{"type":"daily","anchor_date":"2026-07-19","force":false}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Origin", "http://localhost:3000")
+	r.AddCookie(&http.Cookie{Name: "lead_log_session", Value: "top-secret-token"})
+	wr := httptest.NewRecorder()
+	h.ServeHTTP(wr, r)
+	if wr.Code != 200 || !strings.Contains(wr.Body.String(), `"reason":"no_source_notes"`) || wr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("generate failed: %d %s", wr.Code, wr.Body.String())
 	}
 }

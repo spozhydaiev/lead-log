@@ -1742,3 +1742,111 @@ func (s *Store) RecentDecisionsForTicket(ctx context.Context, userID int64, key 
 	}
 	return out, rows.Err()
 }
+
+type SummaryListFilter struct {
+	Type, Status string
+	From, To     *time.Time
+}
+type SummaryCursor struct {
+	PeriodEnd time.Time
+	Kind      string
+	ID        int64
+}
+
+type SourceNote struct {
+	ID        int64
+	CreatedAt time.Time
+	RawText   string
+	Summary   string
+}
+
+func (s *Store) ListSummaries(ctx context.Context, userID int64, f SummaryListFilter, limit int, c *SummaryCursor) ([]models.AgentResponse, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id,user_id,kind,scope_key,period_start,period_end,source_hash,prompt_version,model,response_text,COALESCE(response_json::text,''),created_at,last_used_at
+		FROM agent_responses
+		WHERE user_id=$1
+		  AND kind IN ('daily','weekly')
+		  AND ($2='' OR kind=$2)
+		  AND ($3='' OR $3='ready')
+		  AND ($4::date IS NULL OR (period_end AT TIME ZONE 'UTC')::date >= $4::date)
+		  AND ($5::date IS NULL OR (period_start AT TIME ZONE 'UTC')::date <= $5::date)
+		  AND ($6::timestamptz IS NULL OR (period_end,kind,id) < ($6,$7,$8))
+		ORDER BY period_end DESC, kind DESC, id DESC
+		LIMIT $9`, userID, f.Type, f.Status, f.From, f.To, summaryCursorTime(c), summaryCursorKind(c), summaryCursorID(c), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.AgentResponse
+	for rows.Next() {
+		var r models.AgentResponse
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.ScopeKey, &r.PeriodStart, &r.PeriodEnd, &r.SourceHash, &r.PromptVersion, &r.Model, &r.ResponseText, &r.ResponseJSON, &r.CreatedAt, &r.LastUsedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+func summaryCursorTime(c *SummaryCursor) any {
+	if c == nil {
+		return nil
+	}
+	return c.PeriodEnd
+}
+func summaryCursorKind(c *SummaryCursor) string {
+	if c == nil {
+		return ""
+	}
+	return c.Kind
+}
+func summaryCursorID(c *SummaryCursor) int64 {
+	if c == nil {
+		return 0
+	}
+	return c.ID
+}
+func (s *Store) GetSummary(ctx context.Context, userID, id int64) (models.AgentResponse, error) {
+	var r models.AgentResponse
+	err := s.pool.QueryRow(ctx, `SELECT id,user_id,kind,scope_key,period_start,period_end,source_hash,prompt_version,model,response_text,COALESCE(response_json::text,''),created_at,last_used_at FROM agent_responses WHERE user_id=$1 AND id=$2 AND kind IN ('daily','weekly')`, userID, id).Scan(&r.ID, &r.UserID, &r.Kind, &r.ScopeKey, &r.PeriodStart, &r.PeriodEnd, &r.SourceHash, &r.PromptVersion, &r.Model, &r.ResponseText, &r.ResponseJSON, &r.CreatedAt, &r.LastUsedAt)
+	return r, err
+}
+func (s *Store) RecentSummarySource(ctx context.Context, userID int64, since, before time.Time) (string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id,created_at,raw_text,COALESCE(summary,'') FROM notes WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 ORDER BY created_at ASC`, userID, since, before)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id int64
+		var created time.Time
+		var raw, summary string
+		if err := rows.Scan(&id, &created, &raw, &summary); err != nil {
+			return "", err
+		}
+		b.WriteString(fmt.Sprintf("Note #%d at %s\nSummary: %s\nRaw: %s\n\n", id, created.Format(time.RFC3339), summary, raw))
+	}
+	return b.String(), rows.Err()
+}
+func (s *Store) SourceNotesByIDs(ctx context.Context, userID int64, ids []int64, limit int) ([]SourceNote, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,created_at,raw_text,COALESCE(summary,'') FROM notes WHERE user_id=$1 AND id=ANY($2) ORDER BY created_at ASC,id ASC LIMIT $3`, userID, ids, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SourceNote{}
+	for rows.Next() {
+		var n SourceNote
+		if err := rows.Scan(&n.ID, &n.CreatedAt, &n.RawText, &n.Summary); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
