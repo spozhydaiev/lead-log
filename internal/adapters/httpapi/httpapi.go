@@ -67,17 +67,18 @@ type Service interface {
 }
 type Pinger interface{ Ping(context.Context) error }
 type Config struct {
-	AllowedOrigins       []string
-	ResponseLanguage     string
-	Timezone             string
-	ReadinessTimeout     time.Duration
-	Now                  func() time.Time
-	SessionCookieName    string
-	SessionTTL           time.Duration
-	SessionSecure        bool
-	PasswordMinLength    int
-	TelegramBotUsername  string
-	TelegramLinkTokenTTL time.Duration
+	AllowedOrigins           []string
+	ResponseLanguage         string
+	Timezone                 string
+	ReadinessTimeout         time.Duration
+	Now                      func() time.Time
+	SessionCookieName        string
+	SessionTTL               time.Duration
+	SessionSecure            bool
+	PasswordMinLength        int
+	TelegramBotUsername      string
+	TelegramLinkTokenTTL     time.Duration
+	SummaryGenerationTimeout time.Duration
 }
 type API struct {
 	service Service
@@ -91,6 +92,9 @@ type API struct {
 func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handler {
 	if cfg.ReadinessTimeout <= 0 {
 		cfg.ReadinessTimeout = 2 * time.Second
+	}
+	if cfg.SummaryGenerationTimeout <= 0 {
+		cfg.SummaryGenerationTimeout = 90 * time.Second
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -541,15 +545,20 @@ func (a *API) generateSummary(w http.ResponseWriter, r *http.Request) {
 		validation(w, r)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 55*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.SummaryGenerationTimeout)
 	defer cancel()
 	out, err := a.service.GenerateSummary(ctx, p.UserID, services.SummaryGenerateInput{Type: in.Type, AnchorDate: d, Force: in.Force})
-	if errors.Is(err, context.DeadlineExceeded) {
-		writeError(w, r, 504, "timeout", "The request timed out.")
-		return
-	}
 	if err != nil {
-		writeError(w, r, 503, "summary_generation_failed", "Summary generation is temporarily unavailable.")
+		code, status := summaryErrorCode(err)
+		if code == "client_cancelled" {
+			a.logger.Warn("summary generation cancelled", "operation", "summaries.generate", "error_class", "client_cancelled")
+			return
+		}
+		message := "Summary generation is temporarily unavailable."
+		if status == http.StatusGatewayTimeout {
+			message = "Summary generation timed out."
+		}
+		writeError(w, r, status, code, message)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"data": out})
@@ -1341,4 +1350,29 @@ func mapTicketRecentNote(x store.TicketRecentNote, includeRaw bool) dto.TicketRe
 		y.People = append(y.People, dto.LinkedPerson{ID: publicID("person", p.PersonID), DisplayName: p.Name})
 	}
 	return y
+}
+
+func summaryErrorCode(err error) (string, int) {
+	var safe interface{ Code() string }
+	if errors.As(err, &safe) {
+		switch safe.Code() {
+		case "client_cancelled":
+			return "client_cancelled", 499
+		case "llm_timeout":
+			return "llm_timeout", http.StatusGatewayTimeout
+		case "provider_rate_limited":
+			return "provider_rate_limited", http.StatusServiceUnavailable
+		case "provider_unavailable":
+			return "provider_unavailable", http.StatusServiceUnavailable
+		case "malformed_provider_output":
+			return "malformed_provider_output", http.StatusBadGateway
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		return "client_cancelled", 499
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "summary_timeout", http.StatusGatewayTimeout
+	}
+	return "summary_generation_failed", http.StatusServiceUnavailable
 }

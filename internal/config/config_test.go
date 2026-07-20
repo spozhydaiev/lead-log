@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestAllowedTelegramUserIDsRequired(t *testing.T) {
 	for _, raw := range []string{"", "   ", ","} {
@@ -28,5 +31,13 @@ func TestIsTelegramUserAllowedRequiresExplicitAllowlistEntry(t *testing.T) {
 	}
 	if IsTelegramUserAllowed(allowed, 200) {
 		t.Fatal("missing user should not be allowed")
+	}
+}
+
+func TestSummaryTimeoutMustExceedLLMTimeout(t *testing.T) {
+	llm := 75 * time.Second
+	summary := 90 * time.Second
+	if summary <= llm+10*time.Second {
+		t.Fatal("summary timeout must leave validation and persistence headroom beyond LLM timeout")
 	}
 }

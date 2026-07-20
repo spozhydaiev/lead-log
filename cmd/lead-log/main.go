@@ -38,6 +38,8 @@ func main() {
 		"response_language", string(cfg.ResponseLanguage),
 		"response_language_name", cfg.ResponseLanguage.DisplayName(),
 		"note_enrichment_processing_timeout", cfg.NoteEnrichmentProcessingTimeout.String(),
+		"llm_request_timeout", cfg.LLMRequestTimeout.String(),
+		"summary_generation_timeout", cfg.SummaryGenerationTimeout.String(),
 		"note_enrichment_worker_enabled", cfg.NoteEnrichmentWorkerEnabled,
 		"note_enrichment_poll_interval", cfg.NoteEnrichmentPollInterval.String(),
 		"note_enrichment_batch_size", cfg.NoteEnrichmentBatchSize,
@@ -62,13 +64,13 @@ func main() {
 	}
 
 	st := store.New(pool, logger.With("component", "store"))
-	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ResponseLanguage, logger.With("component", "llm"))
+	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ResponseLanguage, cfg.LLMRequestTimeout, logger.With("component", "llm"))
 
-	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithNoteEnrichmentStaleTimeout(cfg.NoteEnrichmentProcessingTimeout), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
+	service := svc.New(st, llmClient, svc.WithDailyLocation(cfg.DailySummaryLocation), svc.WithNoteEnrichmentStaleTimeout(cfg.NoteEnrichmentProcessingTimeout), svc.WithSummaryGenerationTimeout(cfg.SummaryGenerationTimeout), svc.WithResponseLanguage(cfg.ResponseLanguage), svc.WithLogger(logger.With("component", "service")))
 
 	var httpServerErr <-chan error
 	if cfg.HTTPEnabled {
-		handler := httpapi.New(service, pool, httpapi.Config{AllowedOrigins: cfg.FrontendOrigins, ResponseLanguage: string(cfg.ResponseLanguage), Timezone: cfg.DailySummaryTimezone, SessionCookieName: cfg.AuthSessionCookieName, SessionTTL: cfg.AuthSessionTTL, SessionSecure: cfg.AuthSessionSecure, PasswordMinLength: cfg.AuthPasswordMinLength, TelegramBotUsername: cfg.TelegramBotUsername, TelegramLinkTokenTTL: cfg.TelegramLinkTokenTTL}, logger.With("component", "http_api"))
+		handler := httpapi.New(service, pool, httpapi.Config{AllowedOrigins: cfg.FrontendOrigins, ResponseLanguage: string(cfg.ResponseLanguage), Timezone: cfg.DailySummaryTimezone, SessionCookieName: cfg.AuthSessionCookieName, SessionTTL: cfg.AuthSessionTTL, SessionSecure: cfg.AuthSessionSecure, PasswordMinLength: cfg.AuthPasswordMinLength, TelegramBotUsername: cfg.TelegramBotUsername, TelegramLinkTokenTTL: cfg.TelegramLinkTokenTTL, SummaryGenerationTimeout: cfg.SummaryGenerationTimeout}, logger.With("component", "http_api"))
 		srv := httpapi.NewServer(httpapi.ServerConfig{Address: fmt.Sprintf("%s:%d", cfg.HTTPAddress, cfg.HTTPPort), ReadTimeout: cfg.HTTPReadTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: cfg.HTTPIdleTimeout}, handler)
 		ch := make(chan error, 1)
 		httpServerErr = ch

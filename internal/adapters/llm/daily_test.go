@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/spozhydaiev/lead-log/internal/models"
 )
@@ -182,7 +183,7 @@ func TestProcessDailyUsesTolerantParserForCollaboration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key", "test-model", models.LanguageEnglish)
+	client := NewClient(server.URL, "test-key", "test-model", models.LanguageEnglish, 75*time.Second)
 	digest, err := client.ProcessDaily(context.Background(), "#1 note")
 	if err != nil {
 		t.Fatal(err)
