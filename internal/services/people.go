@@ -179,3 +179,28 @@ func hasControl(s string, multiline bool) bool {
 	}
 	return false
 }
+
+var ErrPersonMergeConflict = store.ErrPersonMergeConflict
+
+type MergePeopleInput struct {
+	SourcePersonID           int64
+	ExpectedPrimaryUpdatedAt *time.Time
+	ExpectedSourceUpdatedAt  *time.Time
+	ProfileResolution        map[string]string
+}
+
+type PersonMergeResult = store.PersonMergeResult
+
+func (s *Service) MergePeople(ctx context.Context, userID, primaryID int64, in MergePeopleInput) (PersonMergeResult, error) {
+	if primaryID == in.SourcePersonID || primaryID <= 0 || in.SourcePersonID <= 0 {
+		return PersonMergeResult{}, ErrPersonValidation
+	}
+	allowedFields := map[string]bool{"display_name": true, "first_name": true, "last_name": true, "job_title": true, "team": true, "company": true, "notes": true}
+	allowedValues := map[string]bool{"primary": true, "source": true, "append": true}
+	for k, v := range in.ProfileResolution {
+		if !allowedFields[k] || !allowedValues[v] || (v == "append" && k != "notes") {
+			return PersonMergeResult{}, ErrPersonValidation
+		}
+	}
+	return s.store.MergePeople(ctx, userID, primaryID, in.SourcePersonID, store.MergePersonProfileInput{ExpectedPrimaryUpdatedAt: in.ExpectedPrimaryUpdatedAt, ExpectedSourceUpdatedAt: in.ExpectedSourceUpdatedAt, ProfileResolution: in.ProfileResolution}, PeopleAliasesLimit)
+}

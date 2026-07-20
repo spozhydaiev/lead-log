@@ -154,6 +154,7 @@ type PeopleRecentNote struct {
 var (
 	ErrPersonIdentityConflict = errors.New("person identity conflict")
 	ErrPersonUpdateConflict   = errors.New("person update conflict")
+	ErrPersonMergeConflict    = errors.New("person merge conflict")
 )
 
 type OptionalStringUpdate struct {
@@ -172,6 +173,29 @@ type UpdatePersonProfileInput struct {
 	AliasesSet        bool
 	Aliases           []string
 	ExpectedUpdatedAt *time.Time
+}
+
+type MergePersonProfileInput struct {
+	ExpectedPrimaryUpdatedAt *time.Time
+	ExpectedSourceUpdatedAt  *time.Time
+	ProfileResolution        map[string]string
+}
+
+type PersonMergeCounts struct {
+	PeopleNotesReassigned   int64
+	PeopleNotesDeduplicated int64
+	ActionsReassigned       int64
+	DecisionsReassigned     int64
+	AliasesMoved            int64
+	AliasesDeduplicated     int64
+}
+
+type PersonMergeResult struct {
+	Person            PersonProfile
+	SourcePersonID    int64
+	CanonicalPersonID int64
+	Idempotent        bool
+	Counts            PersonMergeCounts
 }
 
 type PersonProfile struct {
@@ -2107,4 +2131,224 @@ func (s *Store) UpdatePersonProfile(ctx context.Context, userID, personID int64,
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func (s *Store) MergePeople(ctx context.Context, userID, primaryID, sourceID int64, in MergePersonProfileInput, aliasLimit int) (PersonMergeResult, error) {
+	if primaryID == sourceID {
+		return PersonMergeResult{}, ErrPersonMergeConflict
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `SELECT id,user_id,name,normalized_name,first_name,last_name,job_title,team,company,notes,updated_at,merged_into_person_id FROM people WHERE id=ANY($1::bigint[]) ORDER BY id FOR UPDATE`, []int64{primaryID, sourceID})
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	type row struct {
+		id, user                                 int64
+		name, norm                               string
+		first, last, title, team, company, notes *string
+		updated                                  time.Time
+		merged                                   *int64
+	}
+	locked := map[int64]row{}
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.user, &r.name, &r.norm, &r.first, &r.last, &r.title, &r.team, &r.company, &r.notes, &r.updated, &r.merged); err != nil {
+			rows.Close()
+			return PersonMergeResult{}, err
+		}
+		locked[r.id] = r
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PersonMergeResult{}, err
+	}
+	rows.Close()
+	primary, okp := locked[primaryID]
+	source, oks := locked[sourceID]
+	if !okp || primary.user != userID || !oks || source.user != userID {
+		return PersonMergeResult{}, pgx.ErrNoRows
+	}
+	if source.merged != nil && *source.merged == primaryID {
+		if err := tx.Commit(ctx); err != nil {
+			return PersonMergeResult{}, err
+		}
+		p, err := s.GetPersonWorkspaceProfile(ctx, userID, primaryID, aliasLimit)
+		return PersonMergeResult{Person: p, SourcePersonID: sourceID, CanonicalPersonID: primaryID, Idempotent: true}, err
+	}
+	if primary.merged != nil || source.merged != nil {
+		return PersonMergeResult{}, ErrPersonMergeConflict
+	}
+	if in.ExpectedPrimaryUpdatedAt != nil && !primary.updated.Equal(*in.ExpectedPrimaryUpdatedAt) {
+		return PersonMergeResult{}, ErrPersonUpdateConflict
+	}
+	if in.ExpectedSourceUpdatedAt != nil && !source.updated.Equal(*in.ExpectedSourceUpdatedAt) {
+		return PersonMergeResult{}, ErrPersonUpdateConflict
+	}
+
+	aliases := map[string]string{}
+	addAlias := func(a string) {
+		a = strings.TrimSpace(a)
+		n := NormalizePersonName(a)
+		if n != "" {
+			if _, ok := aliases[n]; !ok {
+				aliases[n] = a
+			}
+		}
+	}
+	addAlias(primary.name)
+	addAlias(source.name)
+	arows, err := tx.Query(ctx, `SELECT alias,normalized_alias FROM person_aliases WHERE user_id=$1 AND person_id IN ($2,$3) ORDER BY person_id,id`, userID, primaryID, sourceID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	for arows.Next() {
+		var a, n string
+		if err := arows.Scan(&a, &n); err != nil {
+			arows.Close()
+			return PersonMergeResult{}, err
+		}
+		if n != "" {
+			if _, ok := aliases[n]; !ok {
+				aliases[n] = a
+			}
+		}
+	}
+	if err := arows.Err(); err != nil {
+		arows.Close()
+		return PersonMergeResult{}, err
+	}
+	arows.Close()
+
+	// validate resolver values before applying deterministic defaults.
+	valid := map[string]bool{"": true, "primary": true, "source": true, "append": true}
+	for k, v := range in.ProfileResolution {
+		if !valid[v] || (k != "display_name" && k != "first_name" && k != "last_name" && k != "job_title" && k != "team" && k != "company" && k != "notes") {
+			return PersonMergeResult{}, ErrPersonMergeConflict
+		}
+	}
+	pickStr := func(field string, pv, sv string) string {
+		if strings.TrimSpace(pv) == "" {
+			return sv
+		}
+		if strings.TrimSpace(sv) == "" || pv == sv {
+			return pv
+		}
+		if in.ProfileResolution[field] == "source" {
+			return sv
+		}
+		return pv
+	}
+	pickPtr := func(field string, pv, sv *string) *string {
+		if pv == nil || strings.TrimSpace(*pv) == "" {
+			return sv
+		}
+		if sv == nil || strings.TrimSpace(*sv) == "" || *pv == *sv {
+			return pv
+		}
+		if in.ProfileResolution[field] == "source" {
+			return sv
+		}
+		return pv
+	}
+	newName := pickStr("display_name", primary.name, source.name)
+	newNorm := NormalizePersonName(newName)
+	var newNotes *string
+	if primary.notes == nil || strings.TrimSpace(*primary.notes) == "" {
+		newNotes = source.notes
+	} else if source.notes == nil || strings.TrimSpace(*source.notes) == "" || *primary.notes == *source.notes {
+		newNotes = primary.notes
+	} else if in.ProfileResolution["notes"] == "source" {
+		newNotes = source.notes
+	} else if in.ProfileResolution["notes"] == "append" {
+		v := *primary.notes + "\n\n--- merged notes ---\n\n" + *source.notes
+		newNotes = &v
+	} else {
+		newNotes = primary.notes
+	}
+	addAlias(newName)
+	if source.name != newName {
+		addAlias(source.name)
+	}
+	if primary.name != newName {
+		addAlias(primary.name)
+	}
+	aliasNorms := make([]string, 0, len(aliases))
+	for n := range aliases {
+		aliasNorms = append(aliasNorms, n)
+	}
+	sort.Strings(aliasNorms)
+	for _, n := range aliasNorms {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2::bigint))`, fmt.Sprintf("person:%d:%s", userID, n), userID); err != nil {
+			return PersonMergeResult{}, err
+		}
+	}
+	var conflict int64
+	for _, n := range aliasNorms {
+		err = tx.QueryRow(ctx, `SELECT owner FROM (SELECT id owner FROM people WHERE user_id=$1 AND normalized_name=$2 AND merged_into_person_id IS NULL UNION ALL SELECT p.id owner FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id WHERE pa.user_id=$1 AND pa.normalized_alias=$2 AND p.merged_into_person_id IS NULL) x WHERE owner<>$3 AND owner<>$4 LIMIT 1`, userID, n, primaryID, sourceID).Scan(&conflict)
+		if err == nil {
+			return PersonMergeResult{}, ErrPersonIdentityConflict
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return PersonMergeResult{}, err
+		}
+	}
+	var counts PersonMergeCounts
+	// deduplicate people_notes by note/type/theme/text.
+	tag, err := tx.Exec(ctx, `DELETE FROM people_notes s USING people_notes p WHERE s.user_id=$1 AND s.person_id=$2 AND p.user_id=s.user_id AND p.person_id=$3 AND p.note_id IS NOT DISTINCT FROM s.note_id AND p.type=s.type AND p.theme IS NOT DISTINCT FROM s.theme AND p.text=s.text`, userID, sourceID, primaryID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	counts.PeopleNotesDeduplicated = tag.RowsAffected()
+	tag, err = tx.Exec(ctx, `UPDATE people_notes SET person_id=$3 WHERE user_id=$1 AND person_id=$2`, userID, sourceID, primaryID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	counts.PeopleNotesReassigned = tag.RowsAffected()
+	tag, err = tx.Exec(ctx, `UPDATE actions SET linked_person_id=$3 WHERE user_id=$1 AND linked_person_id=$2`, userID, sourceID, primaryID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	counts.ActionsReassigned = tag.RowsAffected()
+	tag, err = tx.Exec(ctx, `UPDATE decisions SET linked_person_id=$3 WHERE user_id=$1 AND linked_person_id=$2`, userID, sourceID, primaryID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	counts.DecisionsReassigned = tag.RowsAffected()
+	tag, err = tx.Exec(ctx, `DELETE FROM person_aliases WHERE user_id=$1 AND person_id=$2`, userID, sourceID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	counts.AliasesDeduplicated = tag.RowsAffected()
+	for _, n := range aliasNorms {
+		a := aliases[n]
+		tag, err = tx.Exec(ctx, `INSERT INTO person_aliases (user_id,person_id,alias,normalized_alias) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id,normalized_alias) DO UPDATE SET person_id=EXCLUDED.person_id, alias=EXCLUDED.alias WHERE person_aliases.person_id IN ($2,$5)`, userID, primaryID, a, n, sourceID)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return PersonMergeResult{}, ErrPersonIdentityConflict
+			}
+			return PersonMergeResult{}, err
+		}
+		counts.AliasesMoved += tag.RowsAffected()
+	}
+	_, err = tx.Exec(ctx, `UPDATE people SET name=$3,normalized_name=$4,first_name=$5,last_name=$6,job_title=$7,team=$8,company=$9,notes=$10,updated_at=now() WHERE user_id=$1 AND id=$2`, userID, primaryID, newName, newNorm, pickPtr("first_name", primary.first, source.first), pickPtr("last_name", primary.last, source.last), pickPtr("job_title", primary.title, source.title), pickPtr("team", primary.team, source.team), pickPtr("company", primary.company, source.company), newNotes)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE people SET merged_into_person_id=$3,updated_at=now() WHERE user_id=$1 AND id=$2 AND merged_into_person_id IS NULL`, userID, sourceID, primaryID)
+	if err != nil {
+		return PersonMergeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		if isUniqueViolation(err) {
+			return PersonMergeResult{}, ErrPersonIdentityConflict
+		}
+		return PersonMergeResult{}, err
+	}
+	p, err := s.GetPersonWorkspaceProfile(ctx, userID, primaryID, aliasLimit)
+	return PersonMergeResult{Person: p, SourcePersonID: sourceID, CanonicalPersonID: primaryID, Counts: counts}, err
 }

@@ -28,6 +28,8 @@ type fakeService struct {
 	people           services.PeopleListView
 	person           services.PersonWorkspaceView
 	updateErr        error
+	mergeErr         error
+	mergeResult      services.PersonMergeResult
 	tickets          services.TicketsListView
 	ticket           services.TicketWorkspaceView
 	ticketErr        error
@@ -125,6 +127,18 @@ func (f *fakeService) UpdatePersonProfile(_ context.Context, _ int64, id int64, 
 		return store.PersonProfile{}, f.updateErr
 	}
 	return f.person.Person, nil
+}
+func (f *fakeService) MergePeople(_ context.Context, _ int64, primaryID int64, in services.MergePeopleInput) (services.PersonMergeResult, error) {
+	if primaryID == 404 || in.SourcePersonID == 404 {
+		return services.PersonMergeResult{}, pgx.ErrNoRows
+	}
+	if f.mergeErr != nil {
+		return services.PersonMergeResult{}, f.mergeErr
+	}
+	if f.mergeResult.Person.PersonID == 0 {
+		f.mergeResult = services.PersonMergeResult{Person: f.person.Person, SourcePersonID: in.SourcePersonID, CanonicalPersonID: primaryID}
+	}
+	return f.mergeResult, nil
 }
 func (f *fakeService) GetPersonWorkspace(_ context.Context, _ int64, id int64) (services.PersonWorkspaceView, error) {
 	if id == 404 {
@@ -625,3 +639,39 @@ func TestPatchPersonProfileHTTPConflictAndSafeLogs(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestPeopleMergeEndpoint(t *testing.T) {
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	svc := &fakeService{user: store.WebUser{ID: 7}, person: services.PersonWorkspaceView{Person: store.PersonProfile{PersonID: 12, Name: "Canonical", Aliases: []string{"Source"}, UpdatedAt: now}}}
+	svc.mergeResult = services.PersonMergeResult{Person: svc.person.Person, SourcePersonID: 34, CanonicalPersonID: 12, Counts: store.PersonMergeCounts{PeopleNotesReassigned: 2, PeopleNotesDeduplicated: 1, ActionsReassigned: 3, DecisionsReassigned: 4}}
+	h := New(svc, nil, Config{AllowedOrigins: []string{"http://localhost:3000"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := request(h, "POST", "/api/v1/people/person_12/merge", `{"source_person_id":"person_34","profile_resolution":{"notes":"append"}}`, "top-secret-token")
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q", got)
+	}
+	for _, want := range []string{`"id":"person_12"`, `"source_person_id":"person_34"`, `"canonical_person_id":"person_12"`, `"people_notes_reassigned":2`, `"people_notes_deduplicated":1`, `"actions_reassigned":3`, `"decisions_reassigned":4`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("missing %s in %s", want, w.Body.String())
+		}
+	}
+}
+
+func TestPeopleMergeEndpointRejectsSensitiveLogging(t *testing.T) {
+	var buf bytes.Buffer
+	svc := &fakeService{user: store.WebUser{ID: 7}, person: services.PersonWorkspaceView{Person: store.PersonProfile{PersonID: 12, Name: "Canonical Secret", UpdatedAt: time.Now()}}}
+	svc.mergeResult = services.PersonMergeResult{Person: svc.person.Person, SourcePersonID: 34, CanonicalPersonID: 12}
+	h := New(svc, nil, Config{AllowedOrigins: []string{"http://localhost:3000"}}, slog.New(slog.NewTextHandler(&buf, nil)))
+	w := request(h, "POST", "/api/v1/people/person_12/merge", `{"source_person_id":"person_34","profile_resolution":{"display_name":"source","notes":"append"}}`, "top-secret-token")
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	logs := buf.String()
+	for _, secret := range []string{"Canonical Secret", "display_name", "append"} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("sensitive value %q leaked in logs: %s", secret, logs)
+		}
+	}
+}

@@ -167,6 +167,22 @@ type PersonWorkspaceDetail struct {
 	Page            NotesPage          `json:"page"`
 }
 
+type PersonMergeSummary struct {
+	SourcePersonID          string `json:"source_person_id"`
+	CanonicalPersonID       string `json:"canonical_person_id"`
+	PeopleNotesReassigned   int64  `json:"people_notes_reassigned"`
+	PeopleNotesDeduplicated int64  `json:"people_notes_deduplicated"`
+	ActionsReassigned       int64  `json:"actions_reassigned"`
+	DecisionsReassigned     int64  `json:"decisions_reassigned"`
+	AliasesMoved            int64  `json:"aliases_moved"`
+	AliasesDeduplicated     int64  `json:"aliases_deduplicated"`
+	Idempotent              bool   `json:"idempotent"`
+}
+type PersonMerge struct {
+	Person PersonProfile      `json:"person"`
+	Merge  PersonMergeSummary `json:"merge"`
+}
+
 type TicketRecentNote struct {
 	ID               string         `json:"id"`
 	CreatedAt        time.Time      `json:"created_at"`
