@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/spozhydaiev/lead-log/internal/apperrors"
@@ -147,6 +149,29 @@ type PeopleRecentNote struct {
 	RawText          string
 	ProcessingStatus string
 	Tickets          []string
+}
+
+var (
+	ErrPersonIdentityConflict = errors.New("person identity conflict")
+	ErrPersonUpdateConflict   = errors.New("person update conflict")
+)
+
+type OptionalStringUpdate struct {
+	Set   bool
+	Value *string
+}
+
+type UpdatePersonProfileInput struct {
+	DisplayName       OptionalStringUpdate
+	FirstName         OptionalStringUpdate
+	LastName          OptionalStringUpdate
+	JobTitle          OptionalStringUpdate
+	Team              OptionalStringUpdate
+	Company           OptionalStringUpdate
+	Notes             OptionalStringUpdate
+	AliasesSet        bool
+	Aliases           []string
+	ExpectedUpdatedAt *time.Time
 }
 
 type PersonProfile struct {
@@ -1932,4 +1957,154 @@ func (s *Store) SourceNotesByIDs(ctx context.Context, userID int64, ids []int64,
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) UpdatePersonProfile(ctx context.Context, userID, personID int64, in UpdatePersonProfileInput, aliasLimit int) (PersonProfile, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return PersonProfile{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var cur PersonProfile
+	var normalizedName string
+	err = tx.QueryRow(ctx, `
+		SELECT id,name,normalized_name,first_name,last_name,job_title,team,company,notes,updated_at
+		FROM people p
+		WHERE p.user_id=$1 AND p.id=$2 AND p.merged_into_person_id IS NULL
+		FOR UPDATE`, userID, personID).Scan(&cur.PersonID, &cur.Name, &normalizedName, &cur.FirstName, &cur.LastName, &cur.JobTitle, &cur.Team, &cur.Company, &cur.Notes, &cur.UpdatedAt)
+	if err != nil {
+		return PersonProfile{}, err
+	}
+	if in.ExpectedUpdatedAt != nil && !cur.UpdatedAt.Equal(*in.ExpectedUpdatedAt) {
+		return PersonProfile{}, ErrPersonUpdateConflict
+	}
+
+	newName := cur.Name
+	newNorm := normalizedName
+	if in.DisplayName.Set && in.DisplayName.Value != nil {
+		newName = *in.DisplayName.Value
+		newNorm = NormalizePersonName(newName)
+	}
+	aliasMap := map[string]string{}
+	if in.AliasesSet {
+		for _, a := range in.Aliases {
+			aliasMap[NormalizePersonName(a)] = a
+		}
+	} else {
+		rows, err := tx.Query(ctx, `SELECT alias,normalized_alias FROM person_aliases WHERE user_id=$1 AND person_id=$2`, userID, personID)
+		if err != nil {
+			return PersonProfile{}, err
+		}
+		for rows.Next() {
+			var a, n string
+			if err := rows.Scan(&a, &n); err != nil {
+				rows.Close()
+				return PersonProfile{}, err
+			}
+			aliasMap[n] = a
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return PersonProfile{}, err
+		}
+		rows.Close()
+	}
+	aliasMap[newNorm] = newName
+	oldNorm := NormalizePersonName(cur.Name)
+	if oldNorm != "" {
+		aliasMap[oldNorm] = cur.Name
+	}
+	for n := range aliasMap {
+		if n == "" {
+			delete(aliasMap, n)
+		}
+	}
+
+	norms := make([]string, 0, len(aliasMap)+1)
+	seen := map[string]bool{}
+	for n := range aliasMap {
+		if !seen[n] {
+			norms = append(norms, n)
+			seen[n] = true
+		}
+	}
+	if !seen[newNorm] {
+		norms = append(norms, newNorm)
+	}
+	sort.Strings(norms)
+	for _, n := range norms {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2::bigint))`, fmt.Sprintf("person:%d:%s", userID, n), userID); err != nil {
+			return PersonProfile{}, err
+		}
+	}
+
+	var conflictID int64
+	err = tx.QueryRow(ctx, `SELECT id FROM people WHERE user_id=$1 AND normalized_name=$2 AND merged_into_person_id IS NULL AND id<>$3 LIMIT 1`, userID, newNorm, personID).Scan(&conflictID)
+	if err == nil {
+		return PersonProfile{}, ErrPersonIdentityConflict
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return PersonProfile{}, err
+	}
+	for n := range aliasMap {
+		err = tx.QueryRow(ctx, `
+			SELECT owner FROM (
+			 SELECT p.id owner FROM people p WHERE p.user_id=$1 AND p.normalized_name=$2 AND p.merged_into_person_id IS NULL
+			 UNION ALL
+			 SELECT p.id owner FROM person_aliases pa JOIN people p ON p.id=pa.person_id AND p.user_id=pa.user_id WHERE pa.user_id=$1 AND pa.normalized_alias=$2 AND p.merged_into_person_id IS NULL
+			) x WHERE owner<>$3 LIMIT 1`, userID, n, personID).Scan(&conflictID)
+		if err == nil {
+			return PersonProfile{}, ErrPersonIdentityConflict
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return PersonProfile{}, err
+		}
+	}
+	set := []string{"name=$3", "normalized_name=$4", "updated_at=now()"}
+	args := []any{userID, personID, newName, newNorm}
+	idx := 5
+	add := func(col string, u OptionalStringUpdate) {
+		if u.Set {
+			set = append(set, fmt.Sprintf("%s=$%d", col, idx))
+			args = append(args, u.Value)
+			idx++
+		}
+	}
+	add("first_name", in.FirstName)
+	add("last_name", in.LastName)
+	add("job_title", in.JobTitle)
+	add("team", in.Team)
+	add("company", in.Company)
+	add("notes", in.Notes)
+	q := fmt.Sprintf("UPDATE people SET %s WHERE user_id=$1 AND id=$2", strings.Join(set, ","))
+	if _, err := tx.Exec(ctx, q, args...); err != nil {
+		return PersonProfile{}, err
+	}
+
+	if in.AliasesSet || in.DisplayName.Set {
+		if _, err := tx.Exec(ctx, `DELETE FROM person_aliases WHERE user_id=$1 AND person_id=$2 AND NOT (normalized_alias=ANY($3::text[]))`, userID, personID, norms); err != nil {
+			return PersonProfile{}, err
+		}
+		for n, a := range aliasMap {
+			if _, err := tx.Exec(ctx, `INSERT INTO person_aliases (user_id,person_id,alias,normalized_alias) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id,normalized_alias) DO UPDATE SET person_id=EXCLUDED.person_id, alias=EXCLUDED.alias`, userID, personID, a, n); err != nil {
+				if isUniqueViolation(err) {
+					return PersonProfile{}, ErrPersonIdentityConflict
+				}
+				return PersonProfile{}, err
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		if isUniqueViolation(err) {
+			return PersonProfile{}, ErrPersonIdentityConflict
+		}
+		return PersonProfile{}, err
+	}
+	return s.GetPersonWorkspaceProfile(ctx, userID, personID, aliasLimit)
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

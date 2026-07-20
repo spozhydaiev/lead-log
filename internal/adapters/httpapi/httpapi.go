@@ -58,6 +58,7 @@ type Service interface {
 	GetNoteDetail(context.Context, int64, int64) (services.NoteDetailView, error)
 	ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error)
 	GetPersonWorkspace(context.Context, int64, int64) (services.PersonWorkspaceView, error)
+	UpdatePersonProfile(context.Context, int64, int64, services.UpdatePersonProfileInput) (store.PersonProfile, error)
 	ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error)
 	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
 	AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error)
@@ -122,6 +123,7 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/tickets/{key}", a.auth(http.HandlerFunc(a.ticketDetail)))
 	mux.Handle("GET /api/v1/people", a.auth(http.HandlerFunc(a.people)))
 	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
+	mux.Handle("PATCH /api/v1/people/{id}", a.auth(http.HandlerFunc(a.patchPerson)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
 	mux.Handle("POST /api/v1/ask", a.auth(http.HandlerFunc(a.ask)))
 	mux.Handle("GET /api/v1/summaries", a.auth(http.HandlerFunc(a.summaries)))
@@ -1387,4 +1389,116 @@ func summaryErrorCode(err error) (string, int) {
 		return "summary_timeout", http.StatusGatewayTimeout
 	}
 	return "summary_generation_failed", http.StatusServiceUnavailable
+}
+
+type patchPersonRequest struct {
+	DisplayName       json.RawMessage `json:"display_name"`
+	FirstName         json.RawMessage `json:"first_name"`
+	LastName          json.RawMessage `json:"last_name"`
+	JobTitle          json.RawMessage `json:"job_title"`
+	Team              json.RawMessage `json:"team"`
+	Company           json.RawMessage `json:"company"`
+	Notes             json.RawMessage `json:"notes"`
+	Aliases           json.RawMessage `json:"aliases"`
+	ExpectedUpdatedAt *time.Time      `json:"expected_updated_at"`
+}
+
+func (a *API) patchPerson(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
+	id, ok := parsePublicID(r.PathValue("id"), "person")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	var req patchPersonRequest
+	if code := decode(w, r, &req); code != "" {
+		return
+	}
+	in, ok := mapPatchPersonRequest(req)
+	if !ok {
+		validation(w, r)
+		return
+	}
+	profile, err := a.service.UpdatePersonProfile(r.Context(), p.UserID, id, in)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if errors.Is(err, services.ErrPersonValidation) {
+		validation(w, r)
+		return
+	}
+	if errors.Is(err, services.ErrPersonUpdateConflict) {
+		writeError(w, r, 409, "person_update_conflict", "The person was updated by another request.")
+		return
+	}
+	if errors.Is(err, services.ErrPersonIdentityConflict) {
+		writeError(w, r, 409, "person_identity_conflict", "The requested person identity conflicts with another person.")
+		return
+	}
+	if err != nil {
+		a.internal(w, r, "people.update", err, time.Now())
+		return
+	}
+	a.logger.Info("person profile update completed", "component", "http_api", "operation", "people.update", "operation_id", requestID(r), "result", "success", "person_public_id", publicID("person", id), "display_name_supplied", len(req.DisplayName) > 0, "aliases_supplied", len(req.Aliases) > 0, "alias_count", len(in.Aliases), "profile_fields_supplied", suppliedProfileFieldCount(req))
+	writeJSON(w, 200, map[string]any{"data": mapPersonProfile(profile)})
+}
+
+func mapPatchPersonRequest(req patchPersonRequest) (services.UpdatePersonProfileInput, bool) {
+	var in services.UpdatePersonProfileInput
+	var ok bool
+	if in.DisplayName, ok = decodeNullableString(req.DisplayName); !ok {
+		return in, false
+	}
+	if in.FirstName, ok = decodeNullableString(req.FirstName); !ok {
+		return in, false
+	}
+	if in.LastName, ok = decodeNullableString(req.LastName); !ok {
+		return in, false
+	}
+	if in.JobTitle, ok = decodeNullableString(req.JobTitle); !ok {
+		return in, false
+	}
+	if in.Team, ok = decodeNullableString(req.Team); !ok {
+		return in, false
+	}
+	if in.Company, ok = decodeNullableString(req.Company); !ok {
+		return in, false
+	}
+	if in.Notes, ok = decodeNullableString(req.Notes); !ok {
+		return in, false
+	}
+	if len(req.Aliases) > 0 {
+		in.AliasesSet = true
+		if string(req.Aliases) == "null" {
+			return in, false
+		}
+		if err := json.Unmarshal(req.Aliases, &in.Aliases); err != nil {
+			return in, false
+		}
+	}
+	in.ExpectedUpdatedAt = req.ExpectedUpdatedAt
+	return in, true
+}
+func decodeNullableString(raw json.RawMessage) (services.NullableString, bool) {
+	if len(raw) == 0 {
+		return services.NullableString{}, true
+	}
+	if string(raw) == "null" {
+		return services.NullableString{Set: true}, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return services.NullableString{}, false
+	}
+	return services.NullableString{Set: true, Value: &s}, true
+}
+func suppliedProfileFieldCount(req patchPersonRequest) int {
+	n := 0
+	for _, r := range []json.RawMessage{req.FirstName, req.LastName, req.JobTitle, req.Team, req.Company, req.Notes} {
+		if len(r) > 0 {
+			n++
+		}
+	}
+	return n
 }

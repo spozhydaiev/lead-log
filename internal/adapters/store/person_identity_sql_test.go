@@ -53,3 +53,31 @@ func TestPersonCreationSQLAvoidsAliasDoNothingRace(t *testing.T) {
 		t.Fatal("upsertPerson must not use ON CONFLICT DO NOTHING for aliases")
 	}
 }
+
+func TestUpdatePersonProfileSQLUsesTransactionalLocksAndConflictHandling(t *testing.T) {
+	content, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(content))
+	start := strings.Index(sql, "func (s *store) updatepersonprofile")
+	if start < 0 {
+		t.Fatal("missing UpdatePersonProfile")
+	}
+	body := sql[start:]
+	for _, want := range []string{
+		"begintx(ctx, pgx.txoptions{isolevel: pgx.serializable}",
+		"for update",
+		"pg_advisory_xact_lock",
+		"normalized_name=$4",
+		"delete from person_aliases",
+		"insert into person_aliases",
+		"on conflict (user_id,normalized_alias)",
+		"errpersonidentityconflict",
+		"errpersonupdateconflict",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("UpdatePersonProfile missing %q", want)
+		}
+	}
+}
