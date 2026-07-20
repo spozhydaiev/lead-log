@@ -180,7 +180,7 @@ Commands:
 /done <action_id> — mark an action done
 /daily — daily digest for today without creating actions or people notes
 /daily --refresh — regenerate the daily digest
-/weekly — weekly digest for the last 7 days
+/weekly — weekly digest for the current Monday-to-Sunday week
 /weekly --refresh — regenerate the weekly digest
 /ask <question> — ask about your saved work history with source notes
 /ticket <ticket-key> — show deterministic ticket history from your notes
@@ -198,7 +198,7 @@ const ukHelp = `LeadLog Bot
 /done <action_id> — позначити дію виконаною
 /daily — денний дайджест за сьогодні без створення дій чи нотаток про людей
 /daily --refresh — згенерувати денний дайджест заново
-/weekly — тижневий дайджест за останні 7 днів
+/weekly — тижневий дайджест за поточний тиждень понеділок-неділя
 /weekly --refresh — згенерувати тижневий дайджест заново
 /ask <question> — запитати про збережену робочу історію з джерелами
 /ticket <ticket-key> — показати історію тікета з нотаток
@@ -216,7 +216,7 @@ Polecenia:
 /done <action_id> — oznacz działanie jako wykonane
 /daily — dzienny digest z dziś bez tworzenia działań ani notatek o osobach
 /daily --refresh — wygeneruj dzienny digest ponownie
-/weekly — tygodniowy digest z ostatnich 7 dni
+/weekly — tygodniowy digest za bieżący tydzień od poniedziałku do niedzieli
 /weekly --refresh — wygeneruj tygodniowy digest ponownie
 /ask <question> — zapytaj o zapisaną historię pracy ze źródłami
 /ticket <ticket-key> — pokaż historię ticketa z notatek

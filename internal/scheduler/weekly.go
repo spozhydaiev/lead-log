@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/spozhydaiev/lead-log/internal/domain/periods"
 	"github.com/spozhydaiev/lead-log/internal/logging"
 	"github.com/spozhydaiev/lead-log/internal/services"
 )
@@ -72,14 +73,12 @@ func nextWeeklyRun(now time.Time, runAt time.Duration, loc *time.Location) time.
 	return next
 }
 
-func previousCompletedWeekAnchor(run time.Time, loc *time.Location) time.Time {
-	local := run.In(loc)
-	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-	return day.AddDate(0, 0, -1)
+func previousCompletedWeek(run time.Time, loc *time.Location) periods.Week {
+	return periods.ResolvePreviousCompletedWeek(run, loc)
 }
 
 func (w *WeeklySummary) sendForAll(ctx context.Context, run time.Time) {
-	anchor := previousCompletedWeekAnchor(run, w.location)
+	week := previousCompletedWeek(run, w.location)
 	for _, telegramUserID := range w.telegramUserIDs {
 		opCtx, opID := logging.EnsureOperationID(ctx)
 		userID, err := w.service.EnsureUser(opCtx, telegramUserID, "")
@@ -87,7 +86,7 @@ func (w *WeeklySummary) sendForAll(ctx context.Context, run time.Time) {
 			w.logger.Error("weekly summary failure", logging.WithSafeError([]any{"operation", "scheduler.weekly.ensure_user", "operation_id", opID}, err)...)
 			continue
 		}
-		res, err := w.service.GenerateSummary(opCtx, userID, services.SummaryGenerateInput{Type: "weekly", AnchorDate: anchor, Force: false})
+		res, err := w.service.GenerateSummary(opCtx, userID, services.SummaryGenerateInput{Type: "weekly", AnchorDate: week.Start, Force: false})
 		if err != nil {
 			w.logger.Error("weekly summary failure", logging.WithSafeError([]any{"operation", "scheduler.weekly.generate", "operation_id", opID}, err)...)
 			continue

@@ -158,7 +158,7 @@ Scheduled-send idempotency is keyed by user and source workday, so a restart doe
 - `/done <action_id>` — mark an open loop as done.
 - `/daily` — generate today’s manager digest from raw notes and cache the response without creating actions or people notes.
 - `/daily --refresh` — regenerate today’s digest/cache without creating actions or people notes.
-- `/weekly` — generate a digest for the last 7 days.
+- `/weekly` — generate a digest for the current Monday-to-Sunday calendar week.
 - `/weekly --refresh` — regenerate the weekly digest instead of using cache.
 - `/ask <question>` — ask about saved work history with source-backed answers.
 - `/ticket <ticket-key>` — show deterministic ticket history from exact ticket mentions and bounded raw-note fallback; no Jira/API/LLM lookup is used.
