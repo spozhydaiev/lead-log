@@ -59,6 +59,7 @@ type Service interface {
 	ListPeople(context.Context, int64, services.PeopleListFilter, int, *store.PeoplePageCursor) (services.PeopleListView, error)
 	GetPersonWorkspace(context.Context, int64, int64) (services.PersonWorkspaceView, error)
 	UpdatePersonProfile(context.Context, int64, int64, services.UpdatePersonProfileInput) (store.PersonProfile, error)
+	MergePeople(context.Context, int64, int64, services.MergePeopleInput) (services.PersonMergeResult, error)
 	ListTickets(context.Context, int64, services.TicketsListFilter, int, *store.TicketsPageCursor) (services.TicketsListView, error)
 	GetTicketWorkspace(context.Context, int64, string) (services.TicketWorkspaceView, error)
 	AskAPI(context.Context, int64, string, time.Time, string) (services.AskResponse, error)
@@ -124,6 +125,7 @@ func New(service Service, db Pinger, cfg Config, logger *slog.Logger) http.Handl
 	mux.Handle("GET /api/v1/people", a.auth(http.HandlerFunc(a.people)))
 	mux.Handle("GET /api/v1/people/{id}", a.auth(http.HandlerFunc(a.personDetail)))
 	mux.Handle("PATCH /api/v1/people/{id}", a.auth(http.HandlerFunc(a.patchPerson)))
+	mux.Handle("POST /api/v1/people/{id}/merge", a.auth(http.HandlerFunc(a.mergePeople)))
 	mux.Handle("GET /api/v1/actions", a.auth(http.HandlerFunc(a.actions)))
 	mux.Handle("POST /api/v1/ask", a.auth(http.HandlerFunc(a.ask)))
 	mux.Handle("GET /api/v1/summaries", a.auth(http.HandlerFunc(a.summaries)))
@@ -1389,6 +1391,55 @@ func summaryErrorCode(err error) (string, int) {
 		return "summary_timeout", http.StatusGatewayTimeout
 	}
 	return "summary_generation_failed", http.StatusServiceUnavailable
+}
+
+type mergePeopleRequest struct {
+	SourcePersonID           string            `json:"source_person_id"`
+	ExpectedPrimaryUpdatedAt *time.Time        `json:"expected_primary_updated_at"`
+	ExpectedSourceUpdatedAt  *time.Time        `json:"expected_source_updated_at"`
+	ProfileResolution        map[string]string `json:"profile_resolution"`
+}
+
+func (a *API) mergePeople(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	p, _ := principal(r)
+	primaryID, ok := parsePublicID(r.PathValue("id"), "person")
+	if !ok {
+		validation(w, r)
+		return
+	}
+	var req mergePeopleRequest
+	if code := decode(w, r, &req); code != "" {
+		return
+	}
+	sourceID, ok := parsePublicID(req.SourcePersonID, "person")
+	if !ok || sourceID == primaryID {
+		validation(w, r)
+		return
+	}
+	result, err := a.service.MergePeople(r.Context(), p.UserID, primaryID, services.MergePeopleInput{SourcePersonID: sourceID, ExpectedPrimaryUpdatedAt: req.ExpectedPrimaryUpdatedAt, ExpectedSourceUpdatedAt: req.ExpectedSourceUpdatedAt, ProfileResolution: req.ProfileResolution})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, 404, "not_found", "The resource was not found.")
+		return
+	}
+	if errors.Is(err, services.ErrPersonValidation) {
+		validation(w, r)
+		return
+	}
+	if errors.Is(err, services.ErrPersonUpdateConflict) {
+		writeError(w, r, 409, "person_update_conflict", "One of the people was updated by another request.")
+		return
+	}
+	if errors.Is(err, services.ErrPersonIdentityConflict) || errors.Is(err, services.ErrPersonMergeConflict) {
+		writeError(w, r, 409, "person_merge_conflict", "The requested person merge conflicts with current person identity state.")
+		return
+	}
+	if err != nil {
+		a.internal(w, r, "people.merge", err, start)
+		return
+	}
+	a.logger.Info("person merge completed", "component", "http_api", "operation", "people.merge", "operation_id", requestID(r), "result", "success", "primary_person_public_id", publicID("person", primaryID), "source_person_public_id", publicID("person", sourceID), "people_notes_reassigned", result.Counts.PeopleNotesReassigned, "people_notes_deduplicated", result.Counts.PeopleNotesDeduplicated, "actions_reassigned", result.Counts.ActionsReassigned, "decisions_reassigned", result.Counts.DecisionsReassigned, "idempotent", result.Idempotent, "duration_ms", time.Since(start).Milliseconds())
+	writeJSON(w, 200, map[string]any{"data": dto.PersonMerge{Person: mapPersonProfile(result.Person), Merge: dto.PersonMergeSummary{SourcePersonID: publicID("person", result.SourcePersonID), CanonicalPersonID: publicID("person", result.CanonicalPersonID), PeopleNotesReassigned: result.Counts.PeopleNotesReassigned, PeopleNotesDeduplicated: result.Counts.PeopleNotesDeduplicated, ActionsReassigned: result.Counts.ActionsReassigned, DecisionsReassigned: result.Counts.DecisionsReassigned, AliasesMoved: result.Counts.AliasesMoved, AliasesDeduplicated: result.Counts.AliasesDeduplicated, Idempotent: result.Idempotent}}})
 }
 
 type patchPersonRequest struct {
