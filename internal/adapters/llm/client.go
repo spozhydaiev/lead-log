@@ -102,7 +102,7 @@ func (c *Client) ProcessDaily(ctx context.Context, input string) (models.DailyDi
 
 func (c *Client) SummarizeWeekly(ctx context.Context, input string) (string, error) {
 	prompt := weeklyPrompt(c.language) + "\n\nSource notes/actions:\n" + input
-	return c.chatText(ctx, "weekly", prompt)
+	return c.chatJSON(ctx, "weekly", prompt)
 }
 
 func (c *Client) PlanAskQuery(ctx context.Context, question, currentDate, timezone, language string) (models.AskIntent, error) {
@@ -297,7 +297,19 @@ Summarize what happened, important topics, open loops, risks, decisions, suggest
 Every claim must be phrased as based on the provided notes.
 Keep it concise and practical.
 ` + language.PromptInstruction() + `
-Do not translate or transliterate person names unless mapping to an existing canonical person.`
+Do not translate or transliterate person names unless mapping to an existing canonical person.
+Return valid JSON only with this exact shape. Use empty arrays for empty sections:
+{
+  "summary": "short neutral weekly overview",
+  "highlights": [{"text":"source-backed highlight","source_note_ids":[1]}],
+  "actions": [{"text":"action or follow-up","source_note_ids":[1]}],
+  "decisions": [{"text":"decision or agreement","source_note_ids":[1]}],
+  "people": [{"text":"person-specific context","source_note_ids":[1]}],
+  "tickets": [{"text":"ticket context","source_note_ids":[1]}],
+  "risks": [{"text":"risk or blocker","source_note_ids":[1]}],
+  "open_questions": [{"text":"open question","source_note_ids":[1]}],
+  "repeated_topics": [{"text":"repeated topic","source_note_ids":[1]}]
+}`
 }
 
 func askPlanningPrompt(question, currentDate, timezone, language string) string {

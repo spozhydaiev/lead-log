@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spozhydaiev/lead-log/internal/adapters/llm"
 	"github.com/spozhydaiev/lead-log/internal/adapters/store"
 	"github.com/spozhydaiev/lead-log/internal/models"
 	"github.com/spozhydaiev/lead-log/pkg/utils"
@@ -121,11 +122,17 @@ func (s *Service) GenerateSummary(ctx context.Context, userID int64, in SummaryG
 			return SummaryGenerateResult{}, err
 		}
 	} else {
-		text, err := s.llm.SummarizeWeekly(ctx, source)
+		raw, err := s.llm.SummarizeWeekly(ctx, source)
 		if err != nil {
 			return SummaryGenerateResult{}, err
 		}
-		if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &end, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: text}); err != nil {
+		digest, err := llm.ParseWeeklyDigestJSONWithLogger(raw, s.logger)
+		if err != nil {
+			return SummaryGenerateResult{}, err
+		}
+		b, _ := json.Marshal(digest)
+		text := FormatWeeklyDigest(digest)
+		if err := s.store.SaveAgentResponse(ctx, models.AgentResponse{UserID: userID, Kind: "weekly", ScopeKey: scopeKey, PeriodStart: &start, PeriodEnd: &end, SourceHash: sourceHash, PromptVersion: PromptVersion, Model: s.llm.Model(), ResponseText: text, ResponseJSON: string(b)}); err != nil {
 			return SummaryGenerateResult{}, err
 		}
 	}
@@ -183,7 +190,7 @@ func (s *Service) mapSummary(ctx context.Context, userID int64, r models.AgentRe
 	if r.PeriodEnd != nil {
 		to = r.PeriodEnd.Add(-time.Nanosecond).Format("2006-01-02")
 	}
-	v := SummaryView{ID: fmt.Sprintf("summary_%d", r.ID), Type: r.Kind, Status: "ready", Period: SummaryPeriod{From: from, To: to}, GeneratedAt: r.CreatedAt, Title: summaryTitle(r.Kind, from, to), Preview: runePreview(strings.ReplaceAll(r.ResponseText, "\n", " "), 240)}
+	v := SummaryView{ID: fmt.Sprintf("summary_%d", r.ID), Type: r.Kind, Status: "ready", Period: SummaryPeriod{From: from, To: to}, GeneratedAt: r.CreatedAt, Title: summaryTitle(r.Kind, from, to), Preview: summaryPreview(r)}
 	if detail {
 		v.Content = summaryContent(r)
 		v.Sources = s.summarySources(ctx, userID, r)
@@ -203,6 +210,9 @@ func summaryTitle(kind, from, to string) string {
 	return "Daily summary for " + from
 }
 func summaryContent(r models.AgentResponse) any {
+	if d, ok := normalizedWeeklyDigest(r); ok {
+		return d
+	}
 	if strings.TrimSpace(r.ResponseJSON) != "" {
 		var x any
 		if json.Unmarshal([]byte(r.ResponseJSON), &x) == nil {
@@ -210,6 +220,43 @@ func summaryContent(r models.AgentResponse) any {
 		}
 	}
 	return map[string]any{"text": r.ResponseText}
+}
+
+func normalizedWeeklyDigest(r models.AgentResponse) (models.WeeklyDigest, bool) {
+	if r.Kind != "weekly" {
+		return models.WeeklyDigest{}, false
+	}
+	for _, raw := range []string{r.ResponseJSON, r.ResponseText} {
+		raw = strings.TrimSpace(raw)
+		if !strings.HasPrefix(raw, "{") || !strings.HasSuffix(raw, "}") {
+			continue
+		}
+		d, err := llm.ParseWeeklyDigestJSON(raw)
+		if err == nil {
+			return d, true
+		}
+	}
+	return models.WeeklyDigest{}, false
+}
+
+func summaryPreview(r models.AgentResponse) string {
+	if d, ok := normalizedWeeklyDigest(r); ok && strings.TrimSpace(d.Summary) != "" {
+		return runePreview(strings.ReplaceAll(d.Summary, "\n", " "), 240)
+	}
+	return runePreview(strings.ReplaceAll(r.ResponseText, "\n", " "), 240)
+}
+
+func FormatWeeklyDigest(d models.WeeklyDigest) string {
+	if strings.TrimSpace(d.Summary) != "" {
+		return d.Summary
+	}
+	sections := [][]models.WeeklyTextItem{d.Highlights, d.Actions, d.Decisions, d.People, d.Tickets, d.Risks, d.OpenQuestions, d.RepeatedTopics}
+	for _, items := range sections {
+		if len(items) > 0 {
+			return items[0].Text
+		}
+	}
+	return "Weekly summary generated."
 }
 func (s *Service) summarySources(ctx context.Context, userID int64, r models.AgentResponse) []SummarySource {
 	ids := sourceIDs(r)
