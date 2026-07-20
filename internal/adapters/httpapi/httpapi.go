@@ -1116,7 +1116,7 @@ func (a *API) personDetail(w http.ResponseWriter, r *http.Request) {
 		internal(w, r)
 		return
 	}
-	out := dto.PersonWorkspaceDetail{Person: dto.PersonProfile{ID: publicID("person", v.Person.PersonID), DisplayName: v.Person.Name, Aliases: boundedAliases(v.Person.Aliases), FirstMentionedAt: v.Person.FirstMentionedAt, LastMentionedAt: v.Person.LastMentionedAt, MentionCount: v.Person.MentionCount}, OpenActions: []dto.Action{}, RecentDecisions: []dto.Decision{}, RecentNotes: []dto.PeopleRecentNote{}, Page: dto.NotesPage{NextCursor: nil, HasMore: false}}
+	out := dto.PersonWorkspaceDetail{Person: mapPersonProfile(v.Person), OpenActions: []dto.Action{}, RecentDecisions: []dto.Decision{}, RecentNotes: []dto.PeopleRecentNote{}, Page: dto.NotesPage{NextCursor: nil, HasMore: false}}
 	for _, x := range v.OpenActions {
 		out.OpenActions = append(out.OpenActions, mapAction(x))
 	}
@@ -1131,7 +1131,19 @@ func (a *API) personDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func mapPeopleListItem(x store.PeopleListItem) dto.PeopleListItem {
-	return dto.PeopleListItem{ID: publicID("person", x.PersonID), DisplayName: x.Name, Aliases: boundedAliases(x.Aliases), LastMentionedAt: x.LastMentionedAt, MentionCount: x.MentionCount, OpenActionCount: x.OpenActionCount, RecentNote: mapPeopleRecentNotePtr(x.RecentNote, false)}
+	return dto.PeopleListItem{ID: publicID("person", x.PersonID), DisplayName: x.Name, Aliases: boundedAliases(x.Aliases), FirstName: x.FirstName, LastName: x.LastName, JobTitle: x.JobTitle, Team: x.Team, Company: x.Company, UpdatedAt: x.UpdatedAt, LastMentionedAt: x.LastMentionedAt, MentionCount: x.MentionCount, OpenActionCount: x.OpenActionCount, RecentNote: mapPeopleRecentNotePtr(x.RecentNote, false)}
+}
+func mapPersonProfile(x store.PersonProfile) dto.PersonProfile {
+	out := dto.PersonProfile{ID: publicID("person", x.PersonID), DisplayName: x.Name, Aliases: boundedAliases(x.Aliases), FirstName: x.FirstName, LastName: x.LastName, JobTitle: x.JobTitle, Team: x.Team, Company: x.Company, Notes: x.Notes, UpdatedAt: x.UpdatedAt, FirstMentionedAt: x.FirstMentionedAt, LastMentionedAt: x.LastMentionedAt, MentionCount: x.MentionCount}
+	if x.MergedIntoPersonID != nil {
+		id := publicID("person", *x.MergedIntoPersonID)
+		out.MergedIntoPersonID = &id
+	}
+	if x.RequestedPersonID != 0 && x.RequestedPersonID != x.PersonID {
+		out.RequestedPersonID = publicID("person", x.RequestedPersonID)
+		out.CanonicalPersonID = publicID("person", x.PersonID)
+	}
+	return out
 }
 func mapPeopleRecentNotePtr(x *store.PeopleRecentNote, includeRaw bool) *dto.PeopleRecentNote {
 	if x == nil {

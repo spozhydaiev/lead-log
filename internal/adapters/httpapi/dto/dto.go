@@ -126,6 +126,12 @@ type PeopleListItem struct {
 	ID              string            `json:"id"`
 	DisplayName     string            `json:"display_name"`
 	Aliases         []string          `json:"aliases"`
+	FirstName       *string           `json:"first_name,omitempty"`
+	LastName        *string           `json:"last_name,omitempty"`
+	JobTitle        *string           `json:"job_title,omitempty"`
+	Team            *string           `json:"team,omitempty"`
+	Company         *string           `json:"company,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 	LastMentionedAt time.Time         `json:"last_mentioned_at"`
 	MentionCount    int               `json:"mention_count"`
 	OpenActionCount int               `json:"open_action_count"`
@@ -136,12 +142,22 @@ type PeopleList struct {
 	Page  NotesPage        `json:"page"`
 }
 type PersonProfile struct {
-	ID               string    `json:"id"`
-	DisplayName      string    `json:"display_name"`
-	Aliases          []string  `json:"aliases"`
-	FirstMentionedAt time.Time `json:"first_mentioned_at"`
-	LastMentionedAt  time.Time `json:"last_mentioned_at"`
-	MentionCount     int       `json:"mention_count"`
+	ID                 string    `json:"id"`
+	DisplayName        string    `json:"display_name"`
+	Aliases            []string  `json:"aliases"`
+	FirstName          *string   `json:"first_name,omitempty"`
+	LastName           *string   `json:"last_name,omitempty"`
+	JobTitle           *string   `json:"job_title,omitempty"`
+	Team               *string   `json:"team,omitempty"`
+	Company            *string   `json:"company,omitempty"`
+	Notes              *string   `json:"notes,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	MergedIntoPersonID *string   `json:"merged_into_person_id,omitempty"`
+	RequestedPersonID  string    `json:"requested_person_id,omitempty"`
+	CanonicalPersonID  string    `json:"canonical_person_id,omitempty"`
+	FirstMentionedAt   time.Time `json:"first_mentioned_at"`
+	LastMentionedAt    time.Time `json:"last_mentioned_at"`
+	MentionCount       int       `json:"mention_count"`
 }
 type PersonWorkspaceDetail struct {
 	Person          PersonProfile      `json:"person"`
